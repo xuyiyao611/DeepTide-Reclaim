@@ -16,10 +16,14 @@ qt_add_executable(DeepTideStation
     src/gamewindow.cpp
     src/gamescene.h
     src/gamescene.cpp
+    src/inventory.h
+    src/inventory.cpp
     src/player.h
     src/player.cpp
     src/projectpaths.h
     src/projectpaths.cpp
+    src/resourceitem.h
+    src/resourceitem.cpp
 )
 
 target_link_libraries(DeepTideStation PRIVATE Qt6::Widgets)

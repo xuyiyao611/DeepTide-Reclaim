@@ -8,7 +8,7 @@ GameWindow::GameWindow(QWidget *parent)
     : QMainWindow(parent),
       m_gameScene(new GameScene(this))
 {
-    setWindowTitle(QStringLiteral("深潮回收站 - P3 氧气系统"));
+    setWindowTitle(QStringLiteral("深潮回收站 - P4 采集与背包"));
     resize(1280, 720);
     setMinimumSize(960, 540);
     setCentralWidget(m_gameScene);
