@@ -1,0 +1,19 @@
+# Office temporary files
+~$*
+
+# Qt / CMake build output
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+compile_commands.json
+
+# Visual Studio
+.vs/
+*.VC.db
+*.VC.opendb
+*.suo
+*.user
+
+# Logs
+*.log
