@@ -156,6 +156,7 @@ void checkGameState();
 6. 地图碰撞盒和精灵尺寸不一致时，手感会很差。
 7. 氧气消耗如果直接绑定帧数而不是时间步长，机器快慢不同会导致体验不一致。
 8. 存档结构如果过早写死且没有版本字段，后期改字段容易读档崩溃。
+9. 在 `MinGW + CMake + Qt AutoGen` 组合下，如果项目路径包含中文，可能出现 `AutogenInfo.json` 读取失败；优先通过 ASCII 路径入口构建。
 
 ## 11. 关键指令
 
@@ -184,6 +185,15 @@ cmake --build build --config Debug
 Remove-Item -Recurse -Force .\build
 cmake -S . -B build
 cmake --build build --config Debug
+```
+
+### 当前仓库的稳定构建方式
+
+如果直接在 `D:\大作业` 下用 `MinGW + CMake` 构建，可能因为中文路径触发 Qt 自动生成问题。  
+当前推荐优先使用：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build-qt.ps1
 ```
 
 ## 12. 必跑命令

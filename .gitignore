@@ -8,6 +8,10 @@ CMakeFiles/
 CMakeCache.txt
 compile_commands.json
 
+# Environment checks
+_env_check_qt/
+DeepTideEnvCheck*/
+
 # Visual Studio
 .vs/
 *.VC.db
