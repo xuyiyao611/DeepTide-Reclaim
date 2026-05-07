@@ -16,6 +16,8 @@ qt_add_executable(DeepTideStation
     src/gamewindow.cpp
     src/gamescene.h
     src/gamescene.cpp
+    src/player.h
+    src/player.cpp
     src/projectpaths.h
     src/projectpaths.cpp
 )
