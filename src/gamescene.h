@@ -4,6 +4,7 @@
 #include "player.h"
 #include "resourceitem.h"
 
+#include <QColor>
 #include <QElapsedTimer>
 #include <QHash>
 #include <QRectF>
@@ -90,6 +91,27 @@ public:
         float pushStrength = 0.0f;
     };
 
+    enum class SeaRegionId {
+        CoastalShelf,
+        ThermalFault,
+    };
+
+    struct SeaRegionDefinition {
+        SeaRegionId id;
+        QString name;
+        QString subtitle;
+        QString mainResource;
+        QString mainHazard;
+        float recommendedDepthMeters = 0.0f;
+        int unlockLifetimeCredits = 0;
+        int unlockSuccessfulRuns = 0;
+        ResourceItem::Type unlockKeyResource = ResourceItem::Type::GlowCluster;
+        QColor topColor;
+        QColor midColor;
+        QColor bottomColor;
+        QColor floorColor;
+    };
+
 private:
     void ensurePlayerSpawned();
     void resetRunState();
@@ -110,6 +132,7 @@ private:
     void finishCollection(int resourceIndex);
     void settleCurrentRun();
     void tryPurchaseUpgrade(UpgradeType type);
+    void tryLaunchSelectedRegion();
     void applyDamage(float damage,
                      float oxygenDamage,
                      const QPointF &knockbackDirection,
@@ -121,6 +144,12 @@ private:
     QRectF playAreaRect() const;
     QRectF returnZoneRect() const;
     QVector<QRectF> obstacleRects() const;
+    QVector<SeaRegionDefinition> regionDefinitions() const;
+    SeaRegionDefinition regionDefinition(SeaRegionId id) const;
+    bool isRegionUnlocked(SeaRegionId id) const;
+    void updateRegionUnlocks();
+    QString regionUnlockRequirementText(SeaRegionId id) const;
+    float currentRegionDepthCap() const;
     QVector<UpgradeDefinition> upgradeDefinitions() const;
     UpgradeDefinition upgradeDefinition(UpgradeType type) const;
     int upgradeLevel(UpgradeType type) const;
@@ -136,6 +165,7 @@ private:
     QString formatUpgradeStatus(UpgradeType type) const;
     QString hazardStateText(const HazardCreature &creature) const;
     QString failureReasonText() const;
+    QString regionStatusText(SeaRegionId id) const;
     int sellValueForType(ResourceItem::Type type) const;
     bool isRetainedMaterial(ResourceItem::Type type) const;
     void drawBackground(QPainter &painter) const;
@@ -165,6 +195,8 @@ private:
     bool m_showCollisionDebug = true;
     int m_collectingResourceIndex = -1;
     int m_credits = 0;
+    int m_lifetimeCreditsEarned = 0;
+    int m_successfulRuns = 0;
     float m_playerHealth = 100.0f;
     float m_playerMaxHealth = 100.0f;
     float m_lastDtSeconds = 0.0f;
@@ -181,7 +213,11 @@ private:
     QString m_upgradeFeedbackText;
     QString m_lastDamageReason;
     bool m_assetLayoutReady = false;
+    SeaRegionId m_currentRegion = SeaRegionId::CoastalShelf;
+    SeaRegionId m_selectedRegion = SeaRegionId::CoastalShelf;
     QHash<int, int> m_materialStock;
     QHash<int, int> m_upgradeLevels;
+    QHash<int, bool> m_regionUnlocked;
+    QSet<int> m_discoveredResourceTypes;
     SettlementReport m_lastSettlement;
 };
