@@ -8,7 +8,7 @@ GameWindow::GameWindow(QWidget *parent)
     : QMainWindow(parent),
       m_gameScene(new GameScene(this))
 {
-    setWindowTitle(QStringLiteral("深潮回收站 - P5 返航结算"));
+    setWindowTitle(QStringLiteral("深潮回收站 - P6 升级系统"));
     resize(1280, 720);
     setMinimumSize(960, 540);
     setCentralWidget(m_gameScene);

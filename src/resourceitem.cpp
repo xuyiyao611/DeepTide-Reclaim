@@ -59,7 +59,7 @@ QString ResourceItem::displayName() const
     case Type::GlowCluster:
         return QStringLiteral("荧团浮体");
     case Type::ShellCrystal:
-        return QStringLiteral("壳晶矿");
+        return QStringLiteral("壳晶石");
     case Type::ColdGel:
         return QStringLiteral("冷凝胶");
     case Type::OldPart:

@@ -30,7 +30,7 @@ protected:
 private slots:
     void tick();
 
-private:
+public:
     struct SettlementReport {
         int totalCollected = 0;
         int soldCount = 0;
@@ -42,8 +42,29 @@ private:
         QString retainedSummary;
     };
 
+    enum class UpgradeType {
+        OxygenTank,
+        Thruster,
+        CargoBay,
+        RecoveryArm,
+        PressureHull,
+    };
+
+    struct UpgradeDefinition {
+        UpgradeType type;
+        int hotkey = 0;
+        int maxLevel = 0;
+        ResourceItem::Type materialType = ResourceItem::Type::ShellCrystal;
+        QVector<int> creditCosts;
+        QVector<int> materialCosts;
+        QString name;
+        QString description;
+    };
+
+private:
     void ensurePlayerSpawned();
     void resetRunState();
+    void applyPersistentUpgrades();
     void processInput(float dt);
     void updatePlayer(float dt);
     void updateOxygen(float dt);
@@ -54,14 +75,25 @@ private:
     int currentCollectableIndex() const;
     void finishCollection(int resourceIndex);
     void settleCurrentRun();
+    void tryPurchaseUpgrade(UpgradeType type);
     float currentDepthRatio() const;
     float currentDepthMeters() const;
     QRectF playAreaRect() const;
     QRectF returnZoneRect() const;
     QVector<QRectF> obstacleRects() const;
+    QVector<UpgradeDefinition> upgradeDefinitions() const;
+    UpgradeDefinition upgradeDefinition(UpgradeType type) const;
+    int upgradeLevel(UpgradeType type) const;
+    int currentMaxOxygenValue() const;
+    int currentCargoLimitValue() const;
+    float currentMoveSpeedValue() const;
+    float currentCollectionDurationMultiplier() const;
+    float currentOxygenEfficiencyMultiplier() const;
     QString formatDuration(qint64 durationMs) const;
     QString formatResourceCount(ResourceItem::Type type, int count) const;
     QString formatMaterialStockSummary() const;
+    QString formatUpgradeEffect(UpgradeType type, int level) const;
+    QString formatUpgradeStatus(UpgradeType type) const;
     int sellValueForType(ResourceItem::Type type) const;
     bool isRetainedMaterial(ResourceItem::Type type) const;
     void drawBackground(QPainter &painter) const;
@@ -96,7 +128,9 @@ private:
     qint64 m_totalElapsedMs = 0;
     qint64 m_runElapsedMs = 0;
     QString m_assetStatusText;
+    QString m_upgradeFeedbackText;
     bool m_assetLayoutReady = false;
     QHash<int, int> m_materialStock;
+    QHash<int, int> m_upgradeLevels;
     SettlementReport m_lastSettlement;
 };

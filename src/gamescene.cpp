@@ -16,6 +16,7 @@ Q_LOGGING_CATEGORY(collisionLog, "deep_tide.collision")
 Q_LOGGING_CATEGORY(oxygenLog, "deep_tide.oxygen")
 Q_LOGGING_CATEGORY(collectLog, "deep_tide.collect")
 Q_LOGGING_CATEGORY(settlementLog, "deep_tide.settlement")
+Q_LOGGING_CATEGORY(upgradeLog, "deep_tide.upgrade")
 
 namespace {
 
@@ -50,15 +51,15 @@ QString keyToName(const int key)
     case Qt::Key_D:
         return QStringLiteral("D");
     case Qt::Key_Up:
-        return QStringLiteral("Up");
+        return QStringLiteral("上");
     case Qt::Key_Down:
-        return QStringLiteral("Down");
+        return QStringLiteral("下");
     case Qt::Key_Left:
-        return QStringLiteral("Left");
+        return QStringLiteral("左");
     case Qt::Key_Right:
-        return QStringLiteral("Right");
+        return QStringLiteral("右");
     case Qt::Key_Space:
-        return QStringLiteral("Space");
+        return QStringLiteral("空格");
     case Qt::Key_Escape:
         return QStringLiteral("Esc");
     case Qt::Key_F1:
@@ -69,9 +70,9 @@ QString keyToName(const int key)
         return QStringLiteral("E");
     case Qt::Key_Return:
     case Qt::Key_Enter:
-        return QStringLiteral("Enter");
+        return QStringLiteral("回车");
     default:
-        return QStringLiteral("Key(%1)").arg(key);
+        return QStringLiteral("按键(%1)").arg(key);
     }
 }
 
@@ -89,6 +90,34 @@ QVector<ResourceItem::Type> allResourceTypes()
         ResourceItem::Type::ColdGel,
         ResourceItem::Type::OldPart,
     };
+}
+
+GameScene::UpgradeType upgradeTypeForKey(const int key)
+{
+    switch (key) {
+    case Qt::Key_1:
+        return GameScene::UpgradeType::OxygenTank;
+    case Qt::Key_2:
+        return GameScene::UpgradeType::Thruster;
+    case Qt::Key_3:
+        return GameScene::UpgradeType::CargoBay;
+    case Qt::Key_4:
+        return GameScene::UpgradeType::RecoveryArm;
+    case Qt::Key_5:
+        return GameScene::UpgradeType::PressureHull;
+    default:
+        return GameScene::UpgradeType::OxygenTank;
+    }
+}
+
+bool isUpgradeHotkey(const int key)
+{
+    return key >= Qt::Key_1 && key <= Qt::Key_5;
+}
+
+QString resourceName(ResourceItem::Type type)
+{
+    return ResourceItem(type, ResourceItem::CollectMode::Instant, QPointF(), 0.0f, 0.0f, 0).displayName();
 }
 
 }  // namespace
@@ -112,7 +141,8 @@ GameScene::GameScene(QWidget *parent)
     connect(m_timer, &QTimer::timeout, this, &GameScene::tick);
     m_timer->start(kTargetFrameMs);
     m_elapsedTimer.start();
-    m_inventory.setCargoLimit(10);
+
+    applyPersistentUpgrades();
     ensurePlayerSpawned();
     resetResources();
 
@@ -157,8 +187,10 @@ void GameScene::keyPressEvent(QKeyEvent *event)
     }
 
     if (m_isSettling) {
-        if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter || event->key() == Qt::Key_Space ||
-            event->key() == Qt::Key_E) {
+        if (isUpgradeHotkey(event->key())) {
+            tryPurchaseUpgrade(upgradeTypeForKey(event->key()));
+        } else if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter ||
+                   event->key() == Qt::Key_Space || event->key() == Qt::Key_E) {
             m_isSettling = false;
             resetRunState();
             qCInfo(settlementLog) << "[settlement] settlement closed, next run started.";
@@ -226,8 +258,8 @@ void GameScene::ensurePlayerSpawned()
         m_player.setPosition(QPointF(area.left() + area.width() * kSpawnXFactor,
                                      area.top() + area.height() * kSpawnYFactor));
         m_player.setRadius(28.0f);
-        m_player.setMoveSpeed(240.0f);
-        m_player.setMaxOxygen(100.0f);
+        m_player.setMoveSpeed(currentMoveSpeedValue());
+        m_player.setMaxOxygen(static_cast<float>(currentMaxOxygenValue()));
         m_player.setOxygen(m_player.maxOxygen());
         m_hasSpawnedPlayer = true;
     }
@@ -235,6 +267,7 @@ void GameScene::ensurePlayerSpawned()
 
 void GameScene::resetRunState()
 {
+    applyPersistentUpgrades();
     m_pressedKeys.clear();
     m_isRunFailed = false;
     m_isSettling = false;
@@ -244,12 +277,23 @@ void GameScene::resetRunState()
     m_lastOxygenCostPerSecond = 0.0f;
     m_runElapsedMs = 0;
     m_runMaxDepthMeters = 0.0f;
+    m_upgradeFeedbackText.clear();
     m_player.setVelocity(QPointF());
     m_player.setOxygen(m_player.maxOxygen());
     m_inventory.reset();
     m_hasSpawnedPlayer = false;
     ensurePlayerSpawned();
     resetResources();
+}
+
+void GameScene::applyPersistentUpgrades()
+{
+    m_inventory.setCargoLimit(currentCargoLimitValue());
+    m_player.setMoveSpeed(currentMoveSpeedValue());
+    m_player.setMaxOxygen(static_cast<float>(currentMaxOxygenValue()));
+    if (!m_isRunFailed) {
+        m_player.setOxygen(m_player.maxOxygen());
+    }
 }
 
 void GameScene::processInput(const float dt)
@@ -296,7 +340,6 @@ void GameScene::processInput(const float dt)
     } else {
         const float damping = qMax(0.0f, 1.0f - kWaterDragFactor * dt);
         velocity *= damping;
-
         if (qAbs(velocity.x()) < 2.0f) {
             velocity.setX(0.0f);
         }
@@ -335,19 +378,12 @@ void GameScene::updatePlayer(const float dt)
             if (!bounds.intersects(obstacle)) {
                 continue;
             }
-
             if (dx > 0.0) {
                 bounds.moveRight(obstacle.left());
             } else {
                 bounds.moveLeft(obstacle.right());
             }
             velocity.setX(0.0);
-            qCInfo(collisionLog).noquote()
-                << QStringLiteral("[collision] horizontal hit obstacle at (%1, %2, %3, %4)")
-                       .arg(obstacle.left(), 0, 'f', 1)
-                       .arg(obstacle.top(), 0, 'f', 1)
-                       .arg(obstacle.width(), 0, 'f', 1)
-                       .arg(obstacle.height(), 0, 'f', 1);
         }
     }
 
@@ -367,19 +403,12 @@ void GameScene::updatePlayer(const float dt)
             if (!bounds.intersects(obstacle)) {
                 continue;
             }
-
             if (dy > 0.0) {
                 bounds.moveBottom(obstacle.top());
             } else {
                 bounds.moveTop(obstacle.bottom());
             }
             velocity.setY(0.0);
-            qCInfo(collisionLog).noquote()
-                << QStringLiteral("[collision] vertical hit obstacle at (%1, %2, %3, %4)")
-                       .arg(obstacle.left(), 0, 'f', 1)
-                       .arg(obstacle.top(), 0, 'f', 1)
-                       .arg(obstacle.width(), 0, 'f', 1)
-                       .arg(obstacle.height(), 0, 'f', 1);
         }
     }
 
@@ -389,15 +418,15 @@ void GameScene::updatePlayer(const float dt)
 
 void GameScene::updateOxygen(const float dt)
 {
-    if (dt <= 0.0f || !m_hasSpawnedPlayer || m_isRunFailed) {
+    if (dt <= 0.0f || !m_hasSpawnedPlayer || m_isRunFailed || m_isSettling) {
         return;
     }
 
     const float depthRatio = currentDepthRatio();
     const float moveCost = m_player.isMoving() ? kMoveOxygenCostPerSecond : 0.0f;
-    m_lastOxygenCostPerSecond = kBaseOxygenCostPerSecond +
-                                depthRatio * kDepthOxygenCostPerSecond +
-                                moveCost;
+    m_lastOxygenCostPerSecond = (kBaseOxygenCostPerSecond +
+                                 depthRatio * kDepthOxygenCostPerSecond +
+                                 moveCost) * currentOxygenEfficiencyMultiplier();
 
     m_player.setOxygen(m_player.oxygen() - m_lastOxygenCostPerSecond * dt);
 
@@ -415,11 +444,16 @@ void GameScene::resetResources()
 {
     const QRectF area = playAreaRect();
     m_resources = {
-        ResourceItem(ResourceItem::Type::GlowCluster, ResourceItem::CollectMode::Instant, QPointF(area.left() + area.width() * 0.18, area.top() + area.height() * 0.18), 14.0f, 0.0f, 1),
-        ResourceItem(ResourceItem::Type::GlowCluster, ResourceItem::CollectMode::Instant, QPointF(area.left() + area.width() * 0.53, area.top() + area.height() * 0.14), 14.0f, 0.0f, 1),
-        ResourceItem(ResourceItem::Type::ShellCrystal, ResourceItem::CollectMode::Hold, QPointF(area.left() + area.width() * 0.32, area.top() + area.height() * 0.48), 16.0f, 1.2f, 2),
-        ResourceItem(ResourceItem::Type::ColdGel, ResourceItem::CollectMode::Hold, QPointF(area.left() + area.width() * 0.72, area.top() + area.height() * 0.54), 17.0f, 1.6f, 2),
-        ResourceItem(ResourceItem::Type::OldPart, ResourceItem::CollectMode::Hold, QPointF(area.left() + area.width() * 0.83, area.top() + area.height() * 0.82), 18.0f, 2.1f, 3),
+        ResourceItem(ResourceItem::Type::GlowCluster, ResourceItem::CollectMode::Instant,
+                     QPointF(area.left() + area.width() * 0.18, area.top() + area.height() * 0.18), 14.0f, 0.0f, 1),
+        ResourceItem(ResourceItem::Type::GlowCluster, ResourceItem::CollectMode::Instant,
+                     QPointF(area.left() + area.width() * 0.53, area.top() + area.height() * 0.14), 14.0f, 0.0f, 1),
+        ResourceItem(ResourceItem::Type::ShellCrystal, ResourceItem::CollectMode::Hold,
+                     QPointF(area.left() + area.width() * 0.32, area.top() + area.height() * 0.48), 16.0f, 1.2f, 2),
+        ResourceItem(ResourceItem::Type::ColdGel, ResourceItem::CollectMode::Hold,
+                     QPointF(area.left() + area.width() * 0.72, area.top() + area.height() * 0.54), 17.0f, 1.6f, 2),
+        ResourceItem(ResourceItem::Type::OldPart, ResourceItem::CollectMode::Hold,
+                     QPointF(area.left() + area.width() * 0.83, area.top() + area.height() * 0.82), 18.0f, 2.1f, 3),
     };
 }
 
@@ -463,7 +497,6 @@ void GameScene::updateCollection(const float dt)
     }
 
     const ResourceItem &resource = m_resources.at(resourceIndex);
-
     if (!m_inventory.canStore(resource)) {
         m_collectingResourceIndex = -1;
         m_currentCollectProgress = 0.0f;
@@ -495,7 +528,7 @@ void GameScene::updateCollection(const float dt)
     }
 
     m_currentCollectProgress += dt;
-    if (m_currentCollectProgress >= resource.collectDurationSeconds()) {
+    if (m_currentCollectProgress >= resource.collectDurationSeconds() * currentCollectionDurationMultiplier()) {
         finishCollection(resourceIndex);
     }
 }
@@ -563,7 +596,7 @@ void GameScene::settleCurrentRun()
             m_credits += soldValue;
             report.soldCount += count;
             report.soldValue += soldValue;
-            soldParts.push_back(QStringLiteral("%1 (+%2)").arg(formatResourceCount(type, count)).arg(soldValue));
+            soldParts.push_back(QStringLiteral("%1（+%2积分）").arg(formatResourceCount(type, count)).arg(soldValue));
         }
     }
 
@@ -572,6 +605,7 @@ void GameScene::settleCurrentRun()
 
     m_lastSettlement = report;
     m_isSettling = true;
+    m_upgradeFeedbackText = QStringLiteral("按 1-5 购买升级，然后按回车、空格或 E 开启下一轮出航。");
     m_collectingResourceIndex = -1;
     m_currentCollectProgress = 0.0f;
     m_player.setVelocity(QPointF());
@@ -583,6 +617,45 @@ void GameScene::settleCurrentRun()
                .arg(report.soldCount)
                .arg(report.soldValue)
                .arg(report.retainedCount)
+               .arg(m_credits);
+}
+
+void GameScene::tryPurchaseUpgrade(const UpgradeType type)
+{
+    const UpgradeDefinition definition = upgradeDefinition(type);
+    const int currentLevel = upgradeLevel(type);
+    if (currentLevel >= definition.maxLevel) {
+        m_upgradeFeedbackText = QStringLiteral("%1已达到最高等级。").arg(definition.name);
+        return;
+    }
+
+    const int nextLevel = currentLevel + 1;
+    const int creditCost = definition.creditCosts.at(nextLevel - 1);
+    const int materialCost = definition.materialCosts.at(nextLevel - 1);
+    const int materialStock = m_materialStock.value(static_cast<int>(definition.materialType), 0);
+
+    if (m_credits < creditCost || materialStock < materialCost) {
+        m_upgradeFeedbackText = QStringLiteral("升级失败：%1需要%2积分，还缺少%3个%4。")
+                                    .arg(definition.name)
+                                    .arg(creditCost)
+                                    .arg(qMax(0, materialCost - materialStock))
+                                    .arg(resourceName(definition.materialType));
+        return;
+    }
+
+    m_credits -= creditCost;
+    m_materialStock[static_cast<int>(definition.materialType)] = materialStock - materialCost;
+    m_upgradeLevels[static_cast<int>(type)] = nextLevel;
+    applyPersistentUpgrades();
+    m_upgradeFeedbackText = QStringLiteral("%1已升级到%2级。%3")
+                                .arg(definition.name)
+                                .arg(nextLevel)
+                                .arg(formatUpgradeEffect(type, nextLevel));
+
+    qCInfo(upgradeLog).noquote()
+        << QStringLiteral("[upgrade] %1 -> level %2 | credits=%3")
+               .arg(definition.name)
+               .arg(nextLevel)
                .arg(m_credits);
 }
 
@@ -644,6 +717,86 @@ QVector<QRectF> GameScene::obstacleRects() const
     };
 }
 
+QVector<GameScene::UpgradeDefinition> GameScene::upgradeDefinitions() const
+{
+    return {
+        {UpgradeType::OxygenTank, 1, 3, ResourceItem::Type::ColdGel, {24, 42, 66}, {1, 2, 3},
+         QStringLiteral("压缩气瓶"),
+         QStringLiteral("提高最大氧气容量，延长单次下潜时间。")},
+        {UpgradeType::Thruster, 2, 3, ResourceItem::Type::ShellCrystal, {20, 36, 58}, {1, 2, 3},
+         QStringLiteral("推进器"),
+         QStringLiteral("提高移动速度，返航更稳更快。")},
+        {UpgradeType::CargoBay, 3, 3, ResourceItem::Type::OldPart, {18, 30, 48}, {1, 2, 3},
+         QStringLiteral("货舱扩容"),
+         QStringLiteral("提高单次出航可携带的资源上限。")},
+        {UpgradeType::RecoveryArm, 4, 3, ResourceItem::Type::ShellCrystal, {22, 38, 60}, {1, 2, 2},
+         QStringLiteral("回收机械臂"),
+         QStringLiteral("缩短长按采集重型资源所需时间。")},
+        {UpgradeType::PressureHull, 5, 3, ResourceItem::Type::ColdGel, {26, 44, 68}, {1, 2, 3},
+         QStringLiteral("耐压壳体"),
+         QStringLiteral("降低整次出航过程中的氧气消耗。")},
+    };
+}
+
+GameScene::UpgradeDefinition GameScene::upgradeDefinition(const UpgradeType type) const
+{
+    const QVector<UpgradeDefinition> definitions = upgradeDefinitions();
+    for (const UpgradeDefinition &definition : definitions) {
+        if (definition.type == type) {
+            return definition;
+        }
+    }
+    return definitions.first();
+}
+
+int GameScene::upgradeLevel(const UpgradeType type) const
+{
+    return m_upgradeLevels.value(static_cast<int>(type), 0);
+}
+
+int GameScene::currentMaxOxygenValue() const
+{
+    return 100 + upgradeLevel(UpgradeType::OxygenTank) * 25;
+}
+
+int GameScene::currentCargoLimitValue() const
+{
+    return 10 + upgradeLevel(UpgradeType::CargoBay) * 2;
+}
+
+float GameScene::currentMoveSpeedValue() const
+{
+    return 240.0f + static_cast<float>(upgradeLevel(UpgradeType::Thruster) * 30);
+}
+
+float GameScene::currentCollectionDurationMultiplier() const
+{
+    switch (upgradeLevel(UpgradeType::RecoveryArm)) {
+    case 1:
+        return 0.88f;
+    case 2:
+        return 0.76f;
+    case 3:
+        return 0.64f;
+    default:
+        return 1.0f;
+    }
+}
+
+float GameScene::currentOxygenEfficiencyMultiplier() const
+{
+    switch (upgradeLevel(UpgradeType::PressureHull)) {
+    case 1:
+        return 0.92f;
+    case 2:
+        return 0.84f;
+    case 3:
+        return 0.76f;
+    default:
+        return 1.0f;
+    }
+}
+
 QString GameScene::formatDuration(const qint64 durationMs) const
 {
     const qint64 totalSeconds = qMax<qint64>(0, durationMs / 1000);
@@ -656,14 +809,7 @@ QString GameScene::formatDuration(const qint64 durationMs) const
 
 QString GameScene::formatResourceCount(const ResourceItem::Type type, const int count) const
 {
-    return QStringLiteral("%1x%2").arg(ResourceItem(type,
-                                                    ResourceItem::CollectMode::Instant,
-                                                    QPointF(),
-                                                    0.0f,
-                                                    0.0f,
-                                                    0)
-                                         .displayName())
-        .arg(count);
+    return QStringLiteral("%1x%2").arg(resourceName(type)).arg(count);
 }
 
 QString GameScene::formatMaterialStockSummary() const
@@ -675,8 +821,50 @@ QString GameScene::formatMaterialStockSummary() const
             parts.push_back(formatResourceCount(type, count));
         }
     }
-
     return parts.isEmpty() ? QStringLiteral("无长期材料") : parts.join(QStringLiteral(" / "));
+}
+
+QString GameScene::formatUpgradeEffect(const UpgradeType type, const int level) const
+{
+    switch (type) {
+    case UpgradeType::OxygenTank:
+        return QStringLiteral("最大氧气 %1").arg(100 + level * 25);
+    case UpgradeType::Thruster:
+        return QStringLiteral("移动速度 %1").arg(240 + level * 30);
+    case UpgradeType::CargoBay:
+        return QStringLiteral("货舱上限 %1").arg(10 + level * 2);
+    case UpgradeType::RecoveryArm: {
+        const float multiplier = level == 1 ? 0.88f : (level == 2 ? 0.76f : 0.64f);
+        return QStringLiteral("采集耗时倍率 x%1").arg(multiplier, 0, 'f', 2);
+    }
+    case UpgradeType::PressureHull: {
+        const float multiplier = level == 1 ? 0.92f : (level == 2 ? 0.84f : 0.76f);
+        return QStringLiteral("氧气消耗倍率 x%1").arg(multiplier, 0, 'f', 2);
+    }
+    }
+    return QStringLiteral("无效果");
+}
+
+QString GameScene::formatUpgradeStatus(const UpgradeType type) const
+{
+    const UpgradeDefinition definition = upgradeDefinition(type);
+    const int currentLevel = upgradeLevel(type);
+    if (currentLevel >= definition.maxLevel) {
+        return QStringLiteral("%1级 / 已满级 | %2")
+            .arg(currentLevel)
+            .arg(formatUpgradeEffect(type, currentLevel));
+    }
+
+    const int nextLevel = currentLevel + 1;
+    const int creditCost = definition.creditCosts.at(nextLevel - 1);
+    const int materialCost = definition.materialCosts.at(nextLevel - 1);
+    return QStringLiteral("%1级 -> %2级 | %3积分 + %4个%5 | %6")
+        .arg(currentLevel)
+        .arg(nextLevel)
+        .arg(creditCost)
+        .arg(materialCost)
+        .arg(resourceName(definition.materialType))
+        .arg(formatUpgradeEffect(type, nextLevel));
 }
 
 int GameScene::sellValueForType(const ResourceItem::Type type) const
@@ -689,7 +877,6 @@ int GameScene::sellValueForType(const ResourceItem::Type type) const
     case ResourceItem::Type::OldPart:
         return 0;
     }
-
     return 0;
 }
 
@@ -723,7 +910,7 @@ void GameScene::drawSeaFloor(QPainter &painter) const
     floorPath.moveTo(0.0, height() * 0.82);
     floorPath.cubicTo(width() * 0.25, height() * 0.74,
                       width() * 0.65, height() * 0.92,
-                      width(), height() * 0.8);
+                      width(), height() * 0.80);
     floorPath.lineTo(width(), height());
     floorPath.lineTo(0.0, height());
     floorPath.closeSubpath();
@@ -736,7 +923,6 @@ void GameScene::drawSeaFloor(QPainter &painter) const
 void GameScene::drawObstacles(QPainter &painter) const
 {
     painter.setPen(QPen(QColor(144, 186, 193), 2));
-
     const QVector<QRectF> obstacles = obstacleRects();
     for (int index = 0; index < obstacles.size(); ++index) {
         const QRectF &rect = obstacles.at(index);
@@ -760,7 +946,6 @@ void GameScene::drawReturnZone(QPainter &painter) const
     painter.setPen(QPen(active ? QColor(255, 245, 168) : QColor(158, 232, 255), 2));
     painter.setBrush(active ? QColor(255, 245, 168, 70) : QColor(99, 210, 240, 50));
     painter.drawRoundedRect(zone, 14.0, 14.0);
-
     painter.setPen(QColor(236, 248, 255));
     painter.drawText(zone.adjusted(0.0, 8.0, 0.0, 0.0),
                      Qt::AlignTop | Qt::AlignHCenter,
@@ -806,8 +991,7 @@ void GameScene::drawCollisionDebug(QPainter &painter) const
     painter.drawRect(returnZoneRect());
 
     painter.setPen(QPen(QColor(255, 114, 114, 220), 2, Qt::DashLine));
-    const QVector<QRectF> obstacles = obstacleRects();
-    for (const QRectF &rect : obstacles) {
+    for (const QRectF &rect : obstacleRects()) {
         painter.drawRect(rect);
     }
 
@@ -821,7 +1005,9 @@ void GameScene::drawPlayer(QPainter &painter) const
     const QPointF center = m_player.position();
     const qreal centerX = center.x();
     const qreal baseY = center.y();
-    const qreal bob = m_player.isMoving() ? qSin(static_cast<qreal>(m_totalElapsedMs) / 180.0) * 4.0 : qSin(static_cast<qreal>(m_totalElapsedMs) / 320.0) * 2.0;
+    const qreal bob = m_player.isMoving()
+        ? qSin(static_cast<qreal>(m_totalElapsedMs) / 180.0) * 4.0
+        : qSin(static_cast<qreal>(m_totalElapsedMs) / 320.0) * 2.0;
     const QRectF bodyRect(centerX - 70.0, baseY - 26.0 + bob, 140.0, 52.0);
 
     QColor bodyColor(242, 176, 59);
@@ -870,26 +1056,21 @@ void GameScene::drawHud(QPainter &painter) const
 {
     painter.setPen(Qt::NoPen);
     painter.setBrush(QColor(0, 0, 0, 110));
-    painter.drawRoundedRect(QRect(kHudPadding, kHudPadding, 420, 272), 14, 14);
+    painter.drawRoundedRect(QRect(kHudPadding, kHudPadding, 446, 318), 14, 14);
 
     painter.setPen(QColor(237, 247, 255));
     QFont titleFont = painter.font();
     titleFont.setPointSize(15);
     titleFont.setBold(true);
     painter.setFont(titleFont);
-    painter.drawText(QRect(kHudPadding + 16, kHudPadding + 14, 380, 28),
+    painter.drawText(QRect(kHudPadding + 16, kHudPadding + 14, 410, 28),
                      Qt::AlignLeft | Qt::AlignVCenter,
-                     QStringLiteral("深潮回收站 / P4 采集与背包"));
+                     QStringLiteral("深潮回收站 / P6 升级系统"));
 
     QFont bodyFont = painter.font();
     bodyFont.setPointSize(10);
     bodyFont.setBold(false);
     painter.setFont(bodyFont);
-
-    const QPointF playerPosition = m_player.position();
-    const QPointF playerVelocity = m_player.velocity();
-    const QRectF area = playAreaRect();
-    const QVector<QRectF> obstacles = obstacleRects();
 
     QColor oxygenFillColor(78, 208, 255);
     switch (m_player.oxygenState()) {
@@ -915,15 +1096,22 @@ void GameScene::drawHud(QPainter &painter) const
     const int fillWidth = static_cast<int>((oxygenBarRect.width() - 4) * m_player.oxygenRatio());
     painter.setPen(Qt::NoPen);
     painter.setBrush(oxygenFillColor);
-    painter.drawRoundedRect(QRect(oxygenBarRect.left() + 2, oxygenBarRect.top() + 2, fillWidth, oxygenBarRect.height() - 4), 6, 6);
+    painter.drawRoundedRect(QRect(oxygenBarRect.left() + 2,
+                                  oxygenBarRect.top() + 2,
+                                  fillWidth,
+                                  oxygenBarRect.height() - 4),
+                            6,
+                            6);
 
     painter.setPen(QColor(237, 247, 255));
     painter.drawText(QRect(oxygenBarRect.left(), oxygenBarRect.top() - 20, oxygenBarRect.width(), 18),
                      Qt::AlignLeft | Qt::AlignVCenter,
-                     QStringLiteral("氧气：%1 / %2").arg(m_player.oxygen(), 0, 'f', 1).arg(m_player.maxOxygen(), 0, 'f', 1));
+                     QStringLiteral("氧气：%1 / %2")
+                         .arg(m_player.oxygen(), 0, 'f', 1)
+                         .arg(m_player.maxOxygen(), 0, 'f', 1));
 
-    const int activeResourceIndex = currentCollectableIndex();
     QString interactionText = QStringLiteral("附近资源：无");
+    const int activeResourceIndex = currentCollectableIndex();
     if (activeResourceIndex >= 0) {
         const ResourceItem &resource = m_resources.at(activeResourceIndex);
         interactionText = QStringLiteral("附近资源：%1 / %2")
@@ -934,52 +1122,55 @@ void GameScene::drawHud(QPainter &painter) const
     }
 
     const QStringList lines = {
-        QStringLiteral("定时刷新：QTimer %1 ms").arg(kTargetFrameMs),
-        QStringLiteral("累计运行：%1 ms / dt %.3f s").arg(m_lastTickMs).arg(m_lastDtSeconds, 0, 'f', 3),
-        QStringLiteral("当前深度：%1 m / %2 m").arg(currentDepthMeters(), 0, 'f', 1).arg(kMaxDepthMeters, 0, 'f', 0),
-        QStringLiteral("玩家位置：(%1, %2)").arg(playerPosition.x(), 0, 'f', 1).arg(playerPosition.y(), 0, 'f', 1),
-        QStringLiteral("玩家速度：(%1, %2)").arg(playerVelocity.x(), 0, 'f', 1).arg(playerVelocity.y(), 0, 'f', 1),
+        QStringLiteral("刷新频率：QTimer %1 ms").arg(kTargetFrameMs),
+        QStringLiteral("本轮时长：%1 / 帧间隔 %2 s").arg(formatDuration(m_runElapsedMs)).arg(m_lastDtSeconds, 0, 'f', 3),
+        QStringLiteral("当前深度：%1 m / 最深 %2 m").arg(currentDepthMeters(), 0, 'f', 1).arg(m_runMaxDepthMeters, 0, 'f', 1),
+        QStringLiteral("玩家位置：(%1, %2)").arg(m_player.position().x(), 0, 'f', 1).arg(m_player.position().y(), 0, 'f', 1),
+        QStringLiteral("玩家速度：(%1, %2)").arg(m_player.velocity().x(), 0, 'f', 1).arg(m_player.velocity().y(), 0, 'f', 1),
         QStringLiteral("氧气消耗：%1 / 秒").arg(m_lastOxygenCostPerSecond, 0, 'f', 2),
         QStringLiteral("货舱：%1 / %2").arg(m_inventory.cargoUsed()).arg(m_inventory.cargoLimit()),
-        QStringLiteral("背包：%1").arg(m_inventory.summaryText()),
+        QStringLiteral("本轮背包：%1").arg(m_inventory.summaryText()),
+        QStringLiteral("累计积分：%1").arg(m_credits),
+        QStringLiteral("长期材料：%1").arg(formatMaterialStockSummary()),
         interactionText,
         QStringLiteral("当前输入：%1").arg(activeInputSummary()),
-        QStringLiteral("提示：荧团浮体瞬时回收，其它资源需按住 E"),
+        QStringLiteral("返航方式：进入顶部中间的返航回收区"),
+        QStringLiteral("升级入口：返航结算后按 1-5 购买升级"),
     };
 
     int y = kHudPadding + 86;
     for (const QString &line : lines) {
-        painter.drawText(QRect(kHudPadding + 16, y, 390, 20), Qt::AlignLeft | Qt::AlignVCenter, line);
+        painter.drawText(QRect(kHudPadding + 16, y, 412, 20), Qt::AlignLeft | Qt::AlignVCenter, line);
         y += 22;
     }
 
     painter.setBrush(QColor(0, 0, 0, 105));
-    painter.drawRoundedRect(QRect(width() - 308, kHudPadding, 290, 222), 14, 14);
+    painter.drawRoundedRect(QRect(width() - 328, kHudPadding, 310, 252), 14, 14);
     painter.setPen(QColor(184, 227, 246));
-    painter.drawText(QRect(width() - 290, kHudPadding + 16, 250, 20),
+    painter.drawText(QRect(width() - 310, kHudPadding + 16, 270, 20),
                      Qt::AlignLeft | Qt::AlignVCenter,
-                     QStringLiteral("P4 验证点"));
+                     QStringLiteral("P6 验证点"));
 
     const QStringList checklist = {
-        QStringLiteral("1. E 可采集资源"),
-        QStringLiteral("2. 背包容量受限"),
-        QStringLiteral("3. 可见采集提示"),
-        QStringLiteral("4. 持续采集可中断"),
-        QStringLiteral("5. 资源不会重复入包"),
+        QStringLiteral("1. 存活返航后会打开结算与升级面板"),
+        QStringLiteral("2. 升级会消耗积分和长期材料"),
+        QStringLiteral("3. 升级后下一轮属性立即生效"),
+        QStringLiteral("4. 升满后不能继续购买"),
+        QStringLiteral("5. 结算与升级界面不会继续耗氧"),
     };
 
     y = kHudPadding + 42;
     for (const QString &item : checklist) {
-        painter.drawText(QRect(width() - 290, y, 252, 18), Qt::AlignLeft | Qt::AlignVCenter, item);
+        painter.drawText(QRect(width() - 310, y, 272, 18), Qt::AlignLeft | Qt::AlignVCenter, item);
         y += 20;
     }
 
     if (activeResourceIndex >= 0) {
         const ResourceItem &resource = m_resources.at(activeResourceIndex);
         if (resource.collectMode() == ResourceItem::CollectMode::Hold) {
-            const float duration = qMax(0.001f, resource.collectDurationSeconds());
+            const float duration = qMax(0.001f, resource.collectDurationSeconds() * currentCollectionDurationMultiplier());
             const float progressRatio = qBound(0.0f, m_currentCollectProgress / duration, 1.0f);
-            const QRect progressRect(width() - 290, kHudPadding + 144, 240, 14);
+            const QRect progressRect(width() - 310, kHudPadding + 146, 250, 14);
 
             painter.setPen(QPen(QColor(144, 186, 193), 1));
             painter.setBrush(QColor(23, 37, 49, 220));
@@ -995,69 +1186,68 @@ void GameScene::drawHud(QPainter &painter) const
                                     5);
 
             painter.setPen(QColor(230, 243, 247));
-            painter.drawText(QRect(width() - 290, kHudPadding + 164, 250, 20),
+            painter.drawText(QRect(width() - 310, kHudPadding + 166, 270, 20),
                              Qt::AlignLeft | Qt::AlignVCenter,
                              QStringLiteral("采集进度：%1%").arg(static_cast<int>(progressRatio * 100.0f)));
         }
     } else if (m_inventory.remainingCapacity() <= 0) {
         painter.setPen(QColor(255, 149, 149));
-        painter.drawText(QRect(width() - 290, kHudPadding + 144, 250, 36),
+        painter.drawText(QRect(width() - 310, kHudPadding + 146, 272, 36),
                          Qt::TextWordWrap,
-                         QStringLiteral("货舱已满：当前无法继续回收资源"));
+                         QStringLiteral("货舱已满：可以直接返航完成本轮结算。"));
     }
 
     if (m_player.oxygenState() == Player::OxygenState::Warning) {
         painter.setPen(QColor(255, 210, 94));
-        painter.drawText(QRect(width() - 290, kHudPadding + 186, 252, 18),
+        painter.drawText(QRect(width() - 310, kHudPadding + 190, 272, 18),
                          Qt::AlignLeft | Qt::AlignVCenter,
-                         QStringLiteral("低氧预警：建议尽快返航"));
+                         QStringLiteral("低氧预警：建议尽快上浮返航。"));
     } else if (m_player.oxygenState() == Player::OxygenState::Danger) {
         painter.setPen(QColor(255, 105, 105));
-        painter.drawText(QRect(width() - 290, kHudPadding + 186, 252, 18),
+        painter.drawText(QRect(width() - 310, kHudPadding + 190, 272, 18),
                          Qt::AlignLeft | Qt::AlignVCenter,
-                         QStringLiteral("危险：氧气极低"));
+                         QStringLiteral("危险：氧气极低，返航优先级最高。"));
     } else if (m_isRunFailed) {
         painter.setPen(QColor(255, 105, 105));
-        painter.drawText(QRect(width() - 290, kHudPadding + 186, 252, 36),
+        painter.drawText(QRect(width() - 310, kHudPadding + 190, 272, 42),
                          Qt::TextWordWrap,
-                         QStringLiteral("任务失败：氧气耗尽\n按 R 重新开始本次出航"));
+                         QStringLiteral("任务失败：氧气耗尽，本轮货物丢失。\n按 R 重新开始本轮出航。"));
+    } else if (m_isSettling) {
+        painter.setPen(QColor(148, 241, 188));
+        painter.drawText(QRect(width() - 310, kHudPadding + 190, 272, 42),
+                         Qt::TextWordWrap,
+                         QStringLiteral("返航成功：已进入结算与升级阶段。\n按 1-5 升级，按回车、空格或 E 出航。"));
     }
+
     painter.setPen(Qt::NoPen);
     painter.setBrush(QColor(0, 0, 0, 120));
-    painter.drawRoundedRect(QRect(kHudPadding, height() - 136, 540, 110), 14, 14);
+    painter.drawRoundedRect(QRect(kHudPadding, height() - 136, 650, 110), 14, 14);
 
     painter.setPen(QColor(238, 247, 255));
-    painter.drawText(QRect(kHudPadding + 16, height() - 126, 508, 22),
+    painter.drawText(QRect(kHudPadding + 16, height() - 126, 620, 22),
                      Qt::AlignLeft | Qt::AlignVCenter,
-                     QStringLiteral("P5 Return & Settlement"));
+                     QStringLiteral("当前长期属性"));
 
     const QString returnState = m_isSettling
-        ? QStringLiteral("Returned: settlement open, press Enter/Space/E for next run")
+        ? QStringLiteral("已返航：可以购买升级，再按回车、空格或 E 开启下一轮。")
         : (m_player.bounds().intersects(returnZoneRect()) && !m_isRunFailed
-               ? QStringLiteral("Return zone reached: settlement is being processed")
-               : QStringLiteral("Goal: reach the top-center return zone while alive"));
-    const QString persistentState = QStringLiteral("Credits: %1 | Materials: %2")
+               ? QStringLiteral("已进入返航区：正在准备结算。")
+               : QStringLiteral("目标：保持存活并进入顶部中间返航回收区。"));
+    const QString persistentState = QStringLiteral("积分：%1 | 材料：%2")
                                         .arg(m_credits)
                                         .arg(formatMaterialStockSummary());
-    const QString runState = QStringLiteral("Run Cargo: %1 | Run Time: %2 | Max Depth: %3 m")
-                                 .arg(m_inventory.summaryText())
-                                 .arg(formatDuration(m_runElapsedMs))
-                                 .arg(m_runMaxDepthMeters, 0, 'f', 1);
-    const QString ruleState = QStringLiteral("Rule: Glow Clusters sell for %1 each; other items are retained as long-term materials")
-                                  .arg(kGlowClusterSellValue);
+    const QString runState = QStringLiteral("货舱上限：%1 | 最大氧气：%2 | 移动速度：%3")
+                                 .arg(currentCargoLimitValue())
+                                 .arg(currentMaxOxygenValue())
+                                 .arg(currentMoveSpeedValue(), 0, 'f', 0);
+    const QString ruleState = QStringLiteral("采集耗时倍率：x%1 | 氧气消耗倍率：x%2")
+                                  .arg(currentCollectionDurationMultiplier(), 0, 'f', 2)
+                                  .arg(currentOxygenEfficiencyMultiplier(), 0, 'f', 2);
 
-    painter.drawText(QRect(kHudPadding + 16, height() - 100, 508, 18),
-                     Qt::AlignLeft | Qt::AlignVCenter,
-                     returnState);
-    painter.drawText(QRect(kHudPadding + 16, height() - 78, 508, 18),
-                     Qt::AlignLeft | Qt::AlignVCenter,
-                     persistentState);
-    painter.drawText(QRect(kHudPadding + 16, height() - 56, 508, 18),
-                     Qt::AlignLeft | Qt::AlignVCenter,
-                     runState);
-    painter.drawText(QRect(kHudPadding + 16, height() - 34, 508, 18),
-                     Qt::AlignLeft | Qt::AlignVCenter,
-                     ruleState);
+    painter.drawText(QRect(kHudPadding + 16, height() - 100, 620, 18), Qt::AlignLeft | Qt::AlignVCenter, returnState);
+    painter.drawText(QRect(kHudPadding + 16, height() - 78, 620, 18), Qt::AlignLeft | Qt::AlignVCenter, persistentState);
+    painter.drawText(QRect(kHudPadding + 16, height() - 56, 620, 18), Qt::AlignLeft | Qt::AlignVCenter, runState);
+    painter.drawText(QRect(kHudPadding + 16, height() - 34, 620, 18), Qt::AlignLeft | Qt::AlignVCenter, ruleState);
 }
 
 void GameScene::drawSettlementOverlay(QPainter &painter) const
@@ -1065,7 +1255,7 @@ void GameScene::drawSettlementOverlay(QPainter &painter) const
     painter.save();
     painter.fillRect(rect(), QColor(1, 8, 18, 168));
 
-    const QRect panel(width() / 2 - 270, height() / 2 - 200, 540, 400);
+    const QRect panel(width() / 2 - 380, height() / 2 - 220, 760, 440);
     painter.setPen(QPen(QColor(169, 227, 245), 2));
     painter.setBrush(QColor(8, 24, 39, 236));
     painter.drawRoundedRect(panel, 18, 18);
@@ -1077,37 +1267,70 @@ void GameScene::drawSettlementOverlay(QPainter &painter) const
     painter.setPen(QColor(242, 248, 255));
     painter.drawText(panel.adjusted(24, 20, -24, 0),
                      Qt::AlignTop | Qt::AlignHCenter,
-                     QStringLiteral("本轮返航结算"));
+                     QStringLiteral("返航结算与升级终端"));
 
     QFont bodyFont = painter.font();
-    bodyFont.setPointSize(11);
+    bodyFont.setPointSize(10);
     bodyFont.setBold(false);
     painter.setFont(bodyFont);
 
-    const QStringList lines = {
+    painter.setPen(QColor(199, 232, 244));
+    painter.drawText(QRect(panel.left() + 28, panel.top() + 62, 250, 22),
+                     Qt::AlignLeft | Qt::AlignVCenter,
+                     QStringLiteral("本轮结算"));
+
+    const QStringList settlementLines = {
         QStringLiteral("出航时长：%1").arg(formatDuration(m_lastSettlement.tripDurationMs)),
-        QStringLiteral("最深下潜：%1 m").arg(m_lastSettlement.deepestDepthMeters, 0, 'f', 1),
+        QStringLiteral("最深下潜：%1 米").arg(m_lastSettlement.deepestDepthMeters, 0, 'f', 1),
         QStringLiteral("采集总数：%1").arg(m_lastSettlement.totalCollected),
         QStringLiteral("出售资源：%1").arg(m_lastSettlement.soldSummary),
         QStringLiteral("出售收益：+%1 积分").arg(m_lastSettlement.soldValue),
         QStringLiteral("保留材料：%1").arg(m_lastSettlement.retainedSummary),
         QStringLiteral("累计积分：%1").arg(m_credits),
         QStringLiteral("材料库存：%1").arg(formatMaterialStockSummary()),
-        QStringLiteral("下一步：按 Enter、Space 或 E 开始下一轮出航"),
     };
 
-    int y = panel.top() + 76;
-    for (const QString &line : lines) {
-        painter.drawText(QRect(panel.left() + 28, y, panel.width() - 56, 26),
+    int y = panel.top() + 96;
+    for (const QString &line : settlementLines) {
+        painter.drawText(QRect(panel.left() + 28, y, 320, 24),
                          Qt::AlignLeft | Qt::AlignVCenter,
                          line);
-        y += 32;
+        y += 28;
     }
 
-    painter.setPen(QColor(141, 203, 224));
-    painter.drawText(QRect(panel.left() + 28, panel.bottom() - 56, panel.width() - 56, 24),
+    painter.setPen(QColor(199, 232, 244));
+    painter.drawText(QRect(panel.left() + 382, panel.top() + 62, 320, 22),
                      Qt::AlignLeft | Qt::AlignVCenter,
-                     QStringLiteral("规则：荧团浮体直接兑换积分，壳晶石、冷凝胶、旧时代零件转入长期材料库存。"));
+                     QStringLiteral("升级终端"));
+
+    y = panel.top() + 96;
+    for (const UpgradeDefinition &definition : upgradeDefinitions()) {
+        painter.setPen(QColor(236, 246, 252));
+        painter.drawText(QRect(panel.left() + 382, y, 320, 22),
+                         Qt::AlignLeft | Qt::AlignVCenter,
+                         QStringLiteral("[%1] %2").arg(definition.hotkey).arg(definition.name));
+
+        painter.setPen(QColor(164, 205, 221));
+        painter.drawText(QRect(panel.left() + 382, y + 20, 340, 20),
+                         Qt::AlignLeft | Qt::AlignVCenter,
+                         definition.description);
+        painter.drawText(QRect(panel.left() + 382, y + 40, 340, 20),
+                         Qt::AlignLeft | Qt::AlignVCenter,
+                         formatUpgradeStatus(definition.type));
+        y += 70;
+    }
+
+    painter.setPen(QColor(146, 226, 180));
+    painter.drawText(QRect(panel.left() + 28, panel.bottom() - 70, panel.width() - 56, 24),
+                     Qt::AlignLeft | Qt::AlignVCenter,
+                     m_upgradeFeedbackText.isEmpty()
+                         ? QStringLiteral("按 1-5 购买升级，然后按回车、空格或 E 开启下一轮出航。")
+                         : m_upgradeFeedbackText);
+
+    painter.setPen(QColor(141, 203, 224));
+    painter.drawText(QRect(panel.left() + 28, panel.bottom() - 42, panel.width() - 56, 24),
+                     Qt::AlignLeft | Qt::AlignVCenter,
+                     QStringLiteral("可见升级效果：氧气上限、移动速度、货舱容量、采集效率、氧气消耗。"));
     painter.restore();
 }
 
@@ -1121,7 +1344,7 @@ QString GameScene::activeInputSummary() const
     }
 
     active.sort();
-    return active.isEmpty() ? QStringLiteral("无方向输入") : active.join(", ");
+    return active.isEmpty() ? QStringLiteral("无方向输入") : active.join(QStringLiteral("、"));
 }
 
 void GameScene::logInputState(const char *action, const int key) const

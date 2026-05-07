@@ -70,7 +70,7 @@ QString Inventory::summaryText() const
         parts.push_back(QStringLiteral("荧团浮体x%1").arg(glow));
     }
     if (shell > 0) {
-        parts.push_back(QStringLiteral("壳晶矿x%1").arg(shell));
+        parts.push_back(QStringLiteral("壳晶石x%1").arg(shell));
     }
     if (gel > 0) {
         parts.push_back(QStringLiteral("冷凝胶x%1").arg(gel));
