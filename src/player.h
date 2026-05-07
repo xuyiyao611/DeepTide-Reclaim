@@ -6,6 +6,13 @@
 class Player
 {
 public:
+    enum class OxygenState {
+        Safe,
+        Warning,
+        Danger,
+        Empty,
+    };
+
     enum class Facing {
         Left,
         Right,
@@ -18,6 +25,8 @@ public:
     void setRadius(float radius);
     void setMoveSpeed(float moveSpeed);
     void setFacing(Facing facing);
+    void setOxygen(float oxygen);
+    void setMaxOxygen(float maxOxygen);
 
     QPointF position() const;
     QPointF velocity() const;
@@ -25,6 +34,10 @@ public:
     Facing facing() const;
     float radius() const;
     float moveSpeed() const;
+    float oxygen() const;
+    float maxOxygen() const;
+    float oxygenRatio() const;
+    OxygenState oxygenState() const;
     bool isMoving() const;
 
 private:
@@ -32,5 +45,7 @@ private:
     QPointF m_velocity {0.0, 0.0};
     float m_radius = 28.0f;
     float m_moveSpeed = 240.0f;
+    float m_oxygen = 100.0f;
+    float m_maxOxygen = 100.0f;
     Facing m_facing = Facing::Right;
 };

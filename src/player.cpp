@@ -27,6 +27,17 @@ void Player::setFacing(const Facing facing)
     m_facing = facing;
 }
 
+void Player::setOxygen(const float oxygen)
+{
+    m_oxygen = qBound(0.0f, oxygen, m_maxOxygen);
+}
+
+void Player::setMaxOxygen(const float maxOxygen)
+{
+    m_maxOxygen = qMax(1.0f, maxOxygen);
+    m_oxygen = qBound(0.0f, m_oxygen, m_maxOxygen);
+}
+
 QPointF Player::position() const
 {
     return m_position;
@@ -58,6 +69,37 @@ float Player::radius() const
 float Player::moveSpeed() const
 {
     return m_moveSpeed;
+}
+
+float Player::oxygen() const
+{
+    return m_oxygen;
+}
+
+float Player::maxOxygen() const
+{
+    return m_maxOxygen;
+}
+
+float Player::oxygenRatio() const
+{
+    return m_maxOxygen > 0.0f ? m_oxygen / m_maxOxygen : 0.0f;
+}
+
+Player::OxygenState Player::oxygenState() const
+{
+    if (m_oxygen <= 0.0f) {
+        return OxygenState::Empty;
+    }
+
+    const float ratio = oxygenRatio();
+    if (ratio <= 0.10f) {
+        return OxygenState::Danger;
+    }
+    if (ratio <= 0.25f) {
+        return OxygenState::Warning;
+    }
+    return OxygenState::Safe;
 }
 
 bool Player::isMoving() const

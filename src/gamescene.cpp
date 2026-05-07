@@ -13,6 +13,7 @@ Q_LOGGING_CATEGORY(startupLog, "deep_tide.startup")
 Q_LOGGING_CATEGORY(resourceLog, "deep_tide.resource")
 Q_LOGGING_CATEGORY(inputLog, "deep_tide.input")
 Q_LOGGING_CATEGORY(collisionLog, "deep_tide.collision")
+Q_LOGGING_CATEGORY(oxygenLog, "deep_tide.oxygen")
 
 namespace {
 
@@ -25,6 +26,10 @@ constexpr float kSpawnYFactor = 0.42f;
 constexpr float kPlayAreaMargin = 36.0f;
 constexpr float kTopAreaOffset = 104.0f;
 constexpr float kBottomAreaOffset = 82.0f;
+constexpr float kBaseOxygenCostPerSecond = 4.2f;
+constexpr float kDepthOxygenCostPerSecond = 3.4f;
+constexpr float kMoveOxygenCostPerSecond = 0.9f;
+constexpr float kMaxDepthMeters = 1200.0f;
 
 QString keyToName(const int key)
 {
@@ -51,6 +56,8 @@ QString keyToName(const int key)
         return QStringLiteral("Esc");
     case Qt::Key_F1:
         return QStringLiteral("F1");
+    case Qt::Key_R:
+        return QStringLiteral("R");
     default:
         return QStringLiteral("Key(%1)").arg(key);
     }
@@ -120,6 +127,13 @@ void GameScene::keyPressEvent(QKeyEvent *event)
         return;
     }
 
+    if (event->key() == Qt::Key_R && m_isRunFailed) {
+        resetRunState();
+        qCInfo(oxygenLog) << "[oxygen] run reset after oxygen failure.";
+        event->accept();
+        return;
+    }
+
     m_pressedKeys.insert(event->key());
     logInputState("pressed", event->key());
 
@@ -152,6 +166,7 @@ void GameScene::tick()
     ensurePlayerSpawned();
     processInput(m_lastDtSeconds);
     updatePlayer(m_lastDtSeconds);
+    updateOxygen(m_lastDtSeconds);
 
     update();
 }
@@ -168,13 +183,31 @@ void GameScene::ensurePlayerSpawned()
                                      area.top() + area.height() * kSpawnYFactor));
         m_player.setRadius(28.0f);
         m_player.setMoveSpeed(240.0f);
+        m_player.setMaxOxygen(100.0f);
+        m_player.setOxygen(m_player.maxOxygen());
         m_hasSpawnedPlayer = true;
     }
+}
+
+void GameScene::resetRunState()
+{
+    m_pressedKeys.clear();
+    m_isRunFailed = false;
+    m_lastOxygenCostPerSecond = 0.0f;
+    m_player.setVelocity(QPointF());
+    m_player.setOxygen(m_player.maxOxygen());
+    m_hasSpawnedPlayer = false;
+    ensurePlayerSpawned();
 }
 
 void GameScene::processInput(const float dt)
 {
     Q_UNUSED(dt);
+
+    if (m_isRunFailed) {
+        m_player.setVelocity(QPointF());
+        return;
+    }
 
     float xAxis = 0.0f;
     float yAxis = 0.0f;
@@ -225,7 +258,7 @@ void GameScene::processInput(const float dt)
 
 void GameScene::updatePlayer(const float dt)
 {
-    if (dt <= 0.0f) {
+    if (dt <= 0.0f || m_isRunFailed) {
         return;
     }
 
@@ -300,6 +333,46 @@ void GameScene::updatePlayer(const float dt)
 
     m_player.setVelocity(velocity);
     m_player.setPosition(bounds.center());
+}
+
+void GameScene::updateOxygen(const float dt)
+{
+    if (dt <= 0.0f || !m_hasSpawnedPlayer || m_isRunFailed) {
+        return;
+    }
+
+    const float depthRatio = currentDepthRatio();
+    const float moveCost = m_player.isMoving() ? kMoveOxygenCostPerSecond : 0.0f;
+    m_lastOxygenCostPerSecond = kBaseOxygenCostPerSecond +
+                                depthRatio * kDepthOxygenCostPerSecond +
+                                moveCost;
+
+    m_player.setOxygen(m_player.oxygen() - m_lastOxygenCostPerSecond * dt);
+
+    if (m_player.oxygenState() == Player::OxygenState::Empty) {
+        m_isRunFailed = true;
+        m_player.setVelocity(QPointF());
+        qCWarning(oxygenLog).noquote()
+            << QStringLiteral("[oxygen] depleted at depth=%1m after %2ms")
+                   .arg(currentDepthMeters(), 0, 'f', 1)
+                   .arg(m_totalElapsedMs);
+    }
+}
+
+float GameScene::currentDepthRatio() const
+{
+    const QRectF area = playAreaRect();
+    if (area.height() <= 0.0) {
+        return 0.0f;
+    }
+
+    const float depth = static_cast<float>((m_player.position().y() - area.top()) / area.height());
+    return qBound(0.0f, depth, 1.0f);
+}
+
+float GameScene::currentDepthMeters() const
+{
+    return currentDepthRatio() * kMaxDepthMeters;
 }
 
 QRectF GameScene::playAreaRect() const
@@ -440,13 +513,18 @@ void GameScene::drawPlayer(QPainter &painter) const
         painter.drawEllipse(QPointF(centerX - 82.0, baseY + bob), 12.0, 6.0);
         painter.drawEllipse(QPointF(centerX - 95.0, baseY + bob), 8.0, 4.0);
     }
+
+    if (m_isRunFailed) {
+        painter.setPen(QPen(QColor(255, 112, 112), 3));
+        painter.drawEllipse(QPointF(centerX, baseY + bob), 88.0, 42.0);
+    }
 }
 
 void GameScene::drawHud(QPainter &painter) const
 {
     painter.setPen(Qt::NoPen);
     painter.setBrush(QColor(0, 0, 0, 110));
-    painter.drawRoundedRect(QRect(kHudPadding, kHudPadding, 420, 170), 14, 14);
+    painter.drawRoundedRect(QRect(kHudPadding, kHudPadding, 420, 272), 14, 14);
 
     painter.setPen(QColor(237, 247, 255));
     QFont titleFont = painter.font();
@@ -455,7 +533,7 @@ void GameScene::drawHud(QPainter &painter) const
     painter.setFont(titleFont);
     painter.drawText(QRect(kHudPadding + 16, kHudPadding + 14, 380, 28),
                      Qt::AlignLeft | Qt::AlignVCenter,
-                     QStringLiteral("深潮回收站 / P2 碰撞与边界"));
+                     QStringLiteral("深潮回收站 / P3 氧气系统"));
 
     QFont bodyFont = painter.font();
     bodyFont.setPointSize(10);
@@ -467,42 +545,91 @@ void GameScene::drawHud(QPainter &painter) const
     const QRectF area = playAreaRect();
     const QVector<QRectF> obstacles = obstacleRects();
 
+    QColor oxygenFillColor(78, 208, 255);
+    switch (m_player.oxygenState()) {
+    case Player::OxygenState::Safe:
+        oxygenFillColor = QColor(78, 208, 255);
+        break;
+    case Player::OxygenState::Warning:
+        oxygenFillColor = QColor(255, 205, 78);
+        break;
+    case Player::OxygenState::Danger:
+        oxygenFillColor = QColor(255, 94, 94);
+        break;
+    case Player::OxygenState::Empty:
+        oxygenFillColor = QColor(133, 33, 33);
+        break;
+    }
+
+    const QRect oxygenBarRect(kHudPadding + 16, kHudPadding + 52, 388, 18);
+    painter.setBrush(QColor(23, 37, 49, 220));
+    painter.setPen(QPen(QColor(154, 211, 236), 1));
+    painter.drawRoundedRect(oxygenBarRect, 8, 8);
+
+    const int fillWidth = static_cast<int>((oxygenBarRect.width() - 4) * m_player.oxygenRatio());
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(oxygenFillColor);
+    painter.drawRoundedRect(QRect(oxygenBarRect.left() + 2, oxygenBarRect.top() + 2, fillWidth, oxygenBarRect.height() - 4), 6, 6);
+
+    painter.setPen(QColor(237, 247, 255));
+    painter.drawText(QRect(oxygenBarRect.left(), oxygenBarRect.top() - 20, oxygenBarRect.width(), 18),
+                     Qt::AlignLeft | Qt::AlignVCenter,
+                     QStringLiteral("氧气：%1 / %2").arg(m_player.oxygen(), 0, 'f', 1).arg(m_player.maxOxygen(), 0, 'f', 1));
+
     const QStringList lines = {
         QStringLiteral("定时刷新：QTimer %1 ms").arg(kTargetFrameMs),
         QStringLiteral("累计运行：%1 ms / dt %.3f s").arg(m_lastTickMs).arg(m_lastDtSeconds, 0, 'f', 3),
-        QStringLiteral("游戏区域：(%1, %2, %3, %4)").arg(area.left(), 0, 'f', 0).arg(area.top(), 0, 'f', 0).arg(area.width(), 0, 'f', 0).arg(area.height(), 0, 'f', 0),
+        QStringLiteral("当前深度：%1 m / %2 m").arg(currentDepthMeters(), 0, 'f', 1).arg(kMaxDepthMeters, 0, 'f', 0),
         QStringLiteral("玩家位置：(%1, %2)").arg(playerPosition.x(), 0, 'f', 1).arg(playerPosition.y(), 0, 'f', 1),
         QStringLiteral("玩家速度：(%1, %2)").arg(playerVelocity.x(), 0, 'f', 1).arg(playerVelocity.y(), 0, 'f', 1),
+        QStringLiteral("氧气消耗：%1 / 秒").arg(m_lastOxygenCostPerSecond, 0, 'f', 2),
         QStringLiteral("障碍数量：%1 / 调试框：%2").arg(obstacles.size()).arg(m_showCollisionDebug ? QStringLiteral("开(F1)") : QStringLiteral("关(F1)")),
         QStringLiteral("当前输入：%1").arg(activeInputSummary()),
-        QStringLiteral("提示：用 WASD 贴边和撞障碍，观察 AABB 修正"),
+        QStringLiteral("提示：越深耗氧越快，氧气耗尽后按 R 重置"),
     };
 
-    int y = kHudPadding + 52;
+    int y = kHudPadding + 86;
     for (const QString &line : lines) {
         painter.drawText(QRect(kHudPadding + 16, y, 390, 20), Qt::AlignLeft | Qt::AlignVCenter, line);
         y += 22;
     }
 
     painter.setBrush(QColor(0, 0, 0, 105));
-    painter.drawRoundedRect(QRect(width() - 308, kHudPadding, 290, 138), 14, 14);
+    painter.drawRoundedRect(QRect(width() - 308, kHudPadding, 290, 164), 14, 14);
     painter.setPen(QColor(184, 227, 246));
     painter.drawText(QRect(width() - 290, kHudPadding + 16, 250, 20),
                      Qt::AlignLeft | Qt::AlignVCenter,
-                     QStringLiteral("P2 验证点"));
+                     QStringLiteral("P3 验证点"));
 
     const QStringList checklist = {
-        QStringLiteral("1. 玩家不能越界"),
-        QStringLiteral("2. 玩家不能穿障碍"),
-        QStringLiteral("3. 贴边移动不抖动"),
-        QStringLiteral("4. 撞角不瞬移"),
-        QStringLiteral("5. F1 可切碰撞框"),
+        QStringLiteral("1. 氧气持续下降"),
+        QStringLiteral("2. 深度影响耗氧"),
+        QStringLiteral("3. 低氧颜色预警"),
+        QStringLiteral("4. 耗尽后进入失败"),
+        QStringLiteral("5. R 可重置出航"),
     };
 
     y = kHudPadding + 42;
     for (const QString &item : checklist) {
         painter.drawText(QRect(width() - 290, y, 252, 18), Qt::AlignLeft | Qt::AlignVCenter, item);
         y += 20;
+    }
+
+    if (m_player.oxygenState() == Player::OxygenState::Warning) {
+        painter.setPen(QColor(255, 210, 94));
+        painter.drawText(QRect(width() - 290, kHudPadding + 126, 252, 18),
+                         Qt::AlignLeft | Qt::AlignVCenter,
+                         QStringLiteral("低氧预警：建议尽快返航"));
+    } else if (m_player.oxygenState() == Player::OxygenState::Danger) {
+        painter.setPen(QColor(255, 105, 105));
+        painter.drawText(QRect(width() - 290, kHudPadding + 126, 252, 18),
+                         Qt::AlignLeft | Qt::AlignVCenter,
+                         QStringLiteral("危险：氧气极低"));
+    } else if (m_isRunFailed) {
+        painter.setPen(QColor(255, 105, 105));
+        painter.drawText(QRect(width() - 290, kHudPadding + 126, 252, 36),
+                         Qt::TextWordWrap,
+                         QStringLiteral("任务失败：氧气耗尽\n按 R 重新开始本次出航"));
     }
 }
 

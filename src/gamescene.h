@@ -29,8 +29,12 @@ private slots:
 
 private:
     void ensurePlayerSpawned();
+    void resetRunState();
     void processInput(float dt);
     void updatePlayer(float dt);
+    void updateOxygen(float dt);
+    float currentDepthRatio() const;
+    float currentDepthMeters() const;
     QRectF playAreaRect() const;
     QVector<QRectF> obstacleRects() const;
     void drawBackground(QPainter &painter) const;
@@ -47,8 +51,10 @@ private:
     QSet<int> m_pressedKeys;
     Player m_player;
     bool m_hasSpawnedPlayer = false;
+    bool m_isRunFailed = false;
     bool m_showCollisionDebug = true;
     float m_lastDtSeconds = 0.0f;
+    float m_lastOxygenCostPerSecond = 0.0f;
     qint64 m_lastTickMs = 0;
     qint64 m_totalElapsedMs = 0;
     QString m_assetStatusText;
