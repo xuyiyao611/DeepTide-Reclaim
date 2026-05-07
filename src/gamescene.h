@@ -61,6 +61,35 @@ public:
         QString description;
     };
 
+    struct HazardCreature {
+        enum class State {
+            Patrol,
+            Alert,
+            Cooldown,
+        };
+
+        QString name;
+        QPointF anchor;
+        QPointF position;
+        QPointF velocity;
+        float radius = 24.0f;
+        float patrolRange = 80.0f;
+        float detectRange = 180.0f;
+        float speed = 120.0f;
+        float attackRange = 36.0f;
+        qint64 cooldownMs = 0;
+        bool patrolForward = true;
+        State state = State::Patrol;
+    };
+
+    struct HazardZone {
+        QString name;
+        QRectF rect;
+        float oxygenDrainPerSecond = 0.0f;
+        float damagePerSecond = 0.0f;
+        float pushStrength = 0.0f;
+    };
+
 private:
     void ensurePlayerSpawned();
     void resetRunState();
@@ -69,13 +98,24 @@ private:
     void updatePlayer(float dt);
     void updateOxygen(float dt);
     void resetResources();
+    void resetHazards();
     void updateCollection(float dt);
     void updateRunMetrics(qint64 deltaMs);
+    void updateDamageState(float dt);
+    void updateHazards(float dt);
+    void updateHazardCreatures(float dt);
+    void updateHazardZones(float dt);
     void updateReturnSequence();
     int currentCollectableIndex() const;
     void finishCollection(int resourceIndex);
     void settleCurrentRun();
     void tryPurchaseUpgrade(UpgradeType type);
+    void applyDamage(float damage,
+                     float oxygenDamage,
+                     const QPointF &knockbackDirection,
+                     float knockbackStrength,
+                     const QString &reason);
+    bool isRunLocked() const;
     float currentDepthRatio() const;
     float currentDepthMeters() const;
     QRectF playAreaRect() const;
@@ -94,12 +134,15 @@ private:
     QString formatMaterialStockSummary() const;
     QString formatUpgradeEffect(UpgradeType type, int level) const;
     QString formatUpgradeStatus(UpgradeType type) const;
+    QString hazardStateText(const HazardCreature &creature) const;
+    QString failureReasonText() const;
     int sellValueForType(ResourceItem::Type type) const;
     bool isRetainedMaterial(ResourceItem::Type type) const;
     void drawBackground(QPainter &painter) const;
     void drawSeaFloor(QPainter &painter) const;
     void drawObstacles(QPainter &painter) const;
     void drawReturnZone(QPainter &painter) const;
+    void drawHazards(QPainter &painter) const;
     void drawResources(QPainter &painter) const;
     void drawCollisionDebug(QPainter &painter) const;
     void drawPlayer(QPainter &painter) const;
@@ -114,21 +157,29 @@ private:
     Player m_player;
     Inventory m_inventory;
     QVector<ResourceItem> m_resources;
+    QVector<HazardCreature> m_hazardCreatures;
+    QVector<HazardZone> m_hazardZones;
     bool m_hasSpawnedPlayer = false;
     bool m_isRunFailed = false;
     bool m_isSettling = false;
     bool m_showCollisionDebug = true;
     int m_collectingResourceIndex = -1;
     int m_credits = 0;
+    float m_playerHealth = 100.0f;
+    float m_playerMaxHealth = 100.0f;
     float m_lastDtSeconds = 0.0f;
     float m_currentCollectProgress = 0.0f;
     float m_lastOxygenCostPerSecond = 0.0f;
+    float m_damageFlashSeconds = 0.0f;
+    float m_invulnerabilitySeconds = 0.0f;
+    float m_controlLockSeconds = 0.0f;
     float m_runMaxDepthMeters = 0.0f;
     qint64 m_lastTickMs = 0;
     qint64 m_totalElapsedMs = 0;
     qint64 m_runElapsedMs = 0;
     QString m_assetStatusText;
     QString m_upgradeFeedbackText;
+    QString m_lastDamageReason;
     bool m_assetLayoutReady = false;
     QHash<int, int> m_materialStock;
     QHash<int, int> m_upgradeLevels;

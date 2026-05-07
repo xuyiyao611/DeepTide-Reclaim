@@ -8,6 +8,7 @@
 #include <QPainterPath>
 #include <QTimer>
 #include <QtMath>
+#include <cmath>
 
 Q_LOGGING_CATEGORY(startupLog, "deep_tide.startup")
 Q_LOGGING_CATEGORY(resourceLog, "deep_tide.resource")
@@ -38,6 +39,10 @@ constexpr float kReturnZoneWidthFactor = 0.24f;
 constexpr float kReturnZoneHeight = 54.0f;
 constexpr float kReturnZoneTopInset = 14.0f;
 constexpr int kGlowClusterSellValue = 12;
+constexpr float kPlayerBaseHealth = 100.0f;
+constexpr float kHitInvulnerabilitySeconds = 0.85f;
+constexpr float kHitFlashSeconds = 0.28f;
+constexpr float kControlLockSeconds = 0.20f;
 
 QString keyToName(const int key)
 {
@@ -145,6 +150,7 @@ GameScene::GameScene(QWidget *parent)
     applyPersistentUpgrades();
     ensurePlayerSpawned();
     resetResources();
+    resetHazards();
 
     qCInfo(startupLog) << "[startup] GameScene ready. Timer interval =" << kTargetFrameMs << "ms";
 }
@@ -160,6 +166,7 @@ void GameScene::paintEvent(QPaintEvent *event)
     drawSeaFloor(painter);
     drawReturnZone(painter);
     drawObstacles(painter);
+    drawHazards(painter);
     drawResources(painter);
     drawPlayer(painter);
     if (m_showCollisionDebug) {
@@ -237,12 +244,14 @@ void GameScene::tick()
     m_lastTickMs = nowMs;
 
     ensurePlayerSpawned();
+    updateDamageState(m_lastDtSeconds);
     processInput(m_lastDtSeconds);
     updatePlayer(m_lastDtSeconds);
     updateOxygen(m_lastDtSeconds);
     updateCollection(m_lastDtSeconds);
     updateRunMetrics(deltaMs);
     updateReturnSequence();
+    updateHazards(m_lastDtSeconds);
 
     update();
 }
@@ -278,12 +287,18 @@ void GameScene::resetRunState()
     m_runElapsedMs = 0;
     m_runMaxDepthMeters = 0.0f;
     m_upgradeFeedbackText.clear();
+    m_lastDamageReason.clear();
+    m_playerHealth = m_playerMaxHealth;
+    m_damageFlashSeconds = 0.0f;
+    m_invulnerabilitySeconds = 0.0f;
+    m_controlLockSeconds = 0.0f;
     m_player.setVelocity(QPointF());
     m_player.setOxygen(m_player.maxOxygen());
     m_inventory.reset();
     m_hasSpawnedPlayer = false;
     ensurePlayerSpawned();
     resetResources();
+    resetHazards();
 }
 
 void GameScene::applyPersistentUpgrades()
@@ -291,6 +306,10 @@ void GameScene::applyPersistentUpgrades()
     m_inventory.setCargoLimit(currentCargoLimitValue());
     m_player.setMoveSpeed(currentMoveSpeedValue());
     m_player.setMaxOxygen(static_cast<float>(currentMaxOxygenValue()));
+    m_playerMaxHealth = kPlayerBaseHealth;
+    if (m_playerHealth <= 0.0f || m_playerHealth > m_playerMaxHealth) {
+        m_playerHealth = m_playerMaxHealth;
+    }
     if (!m_isRunFailed) {
         m_player.setOxygen(m_player.maxOxygen());
     }
@@ -302,6 +321,10 @@ void GameScene::processInput(const float dt)
 
     if (m_isRunFailed || m_isSettling) {
         m_player.setVelocity(QPointF());
+        return;
+    }
+
+    if (m_controlLockSeconds > 0.0f) {
         return;
     }
 
@@ -433,6 +456,7 @@ void GameScene::updateOxygen(const float dt)
     if (m_player.oxygenState() == Player::OxygenState::Empty) {
         m_isRunFailed = true;
         m_player.setVelocity(QPointF());
+        m_lastDamageReason = QStringLiteral("氧气耗尽");
         qCWarning(oxygenLog).noquote()
             << QStringLiteral("[oxygen] depleted at depth=%1m after %2ms")
                    .arg(currentDepthMeters(), 0, 'f', 1)
@@ -457,6 +481,35 @@ void GameScene::resetResources()
     };
 }
 
+void GameScene::resetHazards()
+{
+    const QRectF area = playAreaRect();
+    m_hazardCreatures.clear();
+    m_hazardZones.clear();
+
+    HazardCreature ray;
+    ray.name = QStringLiteral("电弧鳐");
+    ray.anchor = QPointF(area.left() + area.width() * 0.60, area.top() + area.height() * 0.36);
+    ray.position = ray.anchor;
+    ray.radius = 26.0f;
+    ray.patrolRange = 120.0f;
+    ray.detectRange = 220.0f;
+    ray.speed = 155.0f;
+    ray.attackRange = 42.0f;
+    m_hazardCreatures.push_back(ray);
+
+    HazardZone vent;
+    vent.name = QStringLiteral("热泉喷口");
+    vent.rect = QRectF(area.left() + area.width() * 0.70,
+                       area.top() + area.height() * 0.60,
+                       110.0,
+                       140.0);
+    vent.oxygenDrainPerSecond = 6.5f;
+    vent.damagePerSecond = 11.0f;
+    vent.pushStrength = 130.0f;
+    m_hazardZones.push_back(vent);
+}
+
 void GameScene::updateRunMetrics(const qint64 deltaMs)
 {
     if (!m_hasSpawnedPlayer || m_isRunFailed || m_isSettling || deltaMs <= 0) {
@@ -465,6 +518,100 @@ void GameScene::updateRunMetrics(const qint64 deltaMs)
 
     m_runElapsedMs += deltaMs;
     m_runMaxDepthMeters = qMax(m_runMaxDepthMeters, currentDepthMeters());
+}
+
+void GameScene::updateDamageState(const float dt)
+{
+    if (dt <= 0.0f) {
+        return;
+    }
+
+    m_damageFlashSeconds = qMax(0.0f, m_damageFlashSeconds - dt);
+    m_invulnerabilitySeconds = qMax(0.0f, m_invulnerabilitySeconds - dt);
+    m_controlLockSeconds = qMax(0.0f, m_controlLockSeconds - dt);
+}
+
+void GameScene::updateHazards(const float dt)
+{
+    if (dt <= 0.0f || !m_hasSpawnedPlayer || m_isRunFailed || m_isSettling) {
+        return;
+    }
+
+    updateHazardCreatures(dt);
+    updateHazardZones(dt);
+}
+
+void GameScene::updateHazardCreatures(const float dt)
+{
+    const QPointF playerPos = m_player.position();
+
+    for (HazardCreature &creature : m_hazardCreatures) {
+        if (creature.cooldownMs > 0) {
+            creature.cooldownMs = qMax<qint64>(0, creature.cooldownMs - static_cast<qint64>(dt * 1000.0f));
+            creature.state = creature.cooldownMs > 0 ? HazardCreature::State::Cooldown : HazardCreature::State::Patrol;
+        }
+
+        const QPointF toPlayer = playerPos - creature.position;
+        const float distance = std::hypot(toPlayer.x(), toPlayer.y());
+
+        QPointF velocity;
+        if (creature.cooldownMs <= 0 && distance <= creature.detectRange) {
+            creature.state = HazardCreature::State::Alert;
+            if (distance > 1.0f) {
+                velocity = QPointF(toPlayer.x() / distance * creature.speed,
+                                   toPlayer.y() / distance * creature.speed);
+            }
+        } else if (creature.cooldownMs <= 0) {
+            creature.state = HazardCreature::State::Patrol;
+            const float targetX = creature.anchor.x() + (creature.patrolForward ? creature.patrolRange : -creature.patrolRange);
+            const float deltaX = targetX - creature.position.x();
+            if (qAbs(deltaX) < 8.0f) {
+                creature.patrolForward = !creature.patrolForward;
+            }
+            velocity = QPointF(creature.patrolForward ? creature.speed * 0.55f : -creature.speed * 0.55f,
+                               qSin((m_totalElapsedMs + static_cast<qint64>(creature.anchor.x())) / 260.0) * 18.0);
+        }
+
+        creature.velocity = velocity;
+        creature.position += velocity * dt;
+
+        if (creature.position.x() < playAreaRect().left() + creature.radius) {
+            creature.position.setX(playAreaRect().left() + creature.radius);
+            creature.patrolForward = true;
+        } else if (creature.position.x() > playAreaRect().right() - creature.radius) {
+            creature.position.setX(playAreaRect().right() - creature.radius);
+            creature.patrolForward = false;
+        }
+
+        const float hitDistance = std::hypot(playerPos.x() - creature.position.x(),
+                                             playerPos.y() - creature.position.y());
+        if (creature.cooldownMs <= 0 &&
+            hitDistance <= creature.attackRange + m_player.radius()) {
+            applyDamage(18.0f,
+                        6.0f,
+                        playerPos - creature.position,
+                        160.0f,
+                        QStringLiteral("被电弧鳐电击"));
+            creature.cooldownMs = 1200;
+            creature.state = HazardCreature::State::Cooldown;
+        }
+    }
+}
+
+void GameScene::updateHazardZones(const float dt)
+{
+    for (const HazardZone &zone : m_hazardZones) {
+        if (!zone.rect.intersects(m_player.bounds())) {
+            continue;
+        }
+
+        m_player.setOxygen(m_player.oxygen() - zone.oxygenDrainPerSecond * dt);
+        applyDamage(zone.damagePerSecond * dt,
+                    0.0f,
+                    QPointF(0.0, -1.0),
+                    zone.pushStrength * dt,
+                    QStringLiteral("被热泉喷口灼伤"));
+    }
 }
 
 void GameScene::updateReturnSequence()
@@ -480,7 +627,7 @@ void GameScene::updateReturnSequence()
 
 void GameScene::updateCollection(const float dt)
 {
-    if (m_isRunFailed || m_isSettling) {
+    if (isRunLocked()) {
         m_collectingResourceIndex = -1;
         m_currentCollectProgress = 0.0f;
         return;
@@ -657,6 +804,51 @@ void GameScene::tryPurchaseUpgrade(const UpgradeType type)
                .arg(definition.name)
                .arg(nextLevel)
                .arg(m_credits);
+}
+
+void GameScene::applyDamage(const float damage,
+                            const float oxygenDamage,
+                            const QPointF &knockbackDirection,
+                            const float knockbackStrength,
+                            const QString &reason)
+{
+    if (m_isRunFailed || m_isSettling) {
+        return;
+    }
+
+    if (damage > 0.0f && m_invulnerabilitySeconds > 0.0f) {
+        return;
+    }
+
+    if (oxygenDamage > 0.0f) {
+        m_player.setOxygen(m_player.oxygen() - oxygenDamage);
+    }
+
+    if (damage > 0.0f) {
+        m_playerHealth = qMax(0.0f, m_playerHealth - damage);
+        m_invulnerabilitySeconds = kHitInvulnerabilitySeconds;
+        m_controlLockSeconds = kControlLockSeconds;
+        m_damageFlashSeconds = kHitFlashSeconds;
+        m_collectingResourceIndex = -1;
+        m_currentCollectProgress = 0.0f;
+        m_lastDamageReason = reason;
+    }
+
+    const float length = std::hypot(knockbackDirection.x(), knockbackDirection.y());
+    if (length > 0.001f && knockbackStrength > 0.0f) {
+        const QPointF normalized(knockbackDirection.x() / length, knockbackDirection.y() / length);
+        m_player.setVelocity(normalized * knockbackStrength);
+    }
+
+    if (m_playerHealth <= 0.0f || m_player.oxygenState() == Player::OxygenState::Empty) {
+        m_isRunFailed = true;
+        m_player.setVelocity(QPointF());
+    }
+}
+
+bool GameScene::isRunLocked() const
+{
+    return m_isRunFailed || m_isSettling || m_controlLockSeconds > 0.0f;
 }
 
 float GameScene::currentDepthRatio() const
@@ -867,6 +1059,28 @@ QString GameScene::formatUpgradeStatus(const UpgradeType type) const
         .arg(formatUpgradeEffect(type, nextLevel));
 }
 
+QString GameScene::hazardStateText(const HazardCreature &creature) const
+{
+    switch (creature.state) {
+    case HazardCreature::State::Patrol:
+        return QStringLiteral("巡逻");
+    case HazardCreature::State::Alert:
+        return QStringLiteral("追击");
+    case HazardCreature::State::Cooldown:
+        return QStringLiteral("冷却");
+    }
+
+    return QStringLiteral("未知");
+}
+
+QString GameScene::failureReasonText() const
+{
+    if (!m_lastDamageReason.isEmpty()) {
+        return m_lastDamageReason;
+    }
+    return QStringLiteral("未知原因");
+}
+
 int GameScene::sellValueForType(const ResourceItem::Type type) const
 {
     switch (type) {
@@ -953,6 +1167,56 @@ void GameScene::drawReturnZone(QPainter &painter) const
     painter.restore();
 }
 
+void GameScene::drawHazards(QPainter &painter) const
+{
+    painter.save();
+
+    for (const HazardZone &zone : m_hazardZones) {
+        QLinearGradient gradient(zone.rect.topLeft(), zone.rect.bottomRight());
+        gradient.setColorAt(0.0, QColor(255, 150, 84, 110));
+        gradient.setColorAt(1.0, QColor(255, 73, 31, 170));
+        painter.setPen(QPen(QColor(255, 214, 184), 2, Qt::DashLine));
+        painter.setBrush(gradient);
+        painter.drawRoundedRect(zone.rect, 18.0, 18.0);
+        painter.setPen(QColor(255, 238, 220));
+        painter.drawText(zone.rect.adjusted(0, 8, 0, 0), Qt::AlignTop | Qt::AlignHCenter, zone.name);
+
+        for (int i = 0; i < 4; ++i) {
+            const qreal x = zone.rect.left() + 18.0 + i * 22.0;
+            const qreal offset = qSin((m_totalElapsedMs + i * 90) / 180.0) * 10.0;
+            painter.setBrush(QColor(255, 237, 196, 120));
+            painter.drawEllipse(QPointF(x, zone.rect.bottom() - 18.0 - offset), 6.0, 10.0);
+        }
+    }
+
+    for (const HazardCreature &creature : m_hazardCreatures) {
+        const bool alert = creature.state == HazardCreature::State::Alert;
+        painter.setPen(QPen(alert ? QColor(255, 238, 180) : QColor(183, 238, 255), 2));
+        painter.setBrush(alert ? QColor(255, 98, 66) : QColor(70, 185, 222));
+        painter.drawEllipse(creature.position, creature.radius, creature.radius * 0.72);
+
+        painter.setBrush(QColor(255, 244, 168, 180));
+        painter.drawEllipse(QPointF(creature.position.x() + creature.radius * 0.35,
+                                    creature.position.y() - creature.radius * 0.18),
+                            5.0,
+                            5.0);
+
+        painter.setPen(QPen(QColor(255, 206, 103, alert ? 180 : 90), 1, Qt::DashLine));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawEllipse(creature.position, creature.detectRange, creature.detectRange);
+
+        painter.setPen(QColor(235, 247, 255));
+        painter.drawText(QRectF(creature.position.x() - 72.0,
+                                creature.position.y() - creature.radius - 30.0,
+                                144.0,
+                                20.0),
+                         Qt::AlignCenter,
+                         QStringLiteral("%1 / %2").arg(creature.name, hazardStateText(creature)));
+    }
+
+    painter.restore();
+}
+
 void GameScene::drawResources(QPainter &painter) const
 {
     const int activeIndex = currentCollectableIndex();
@@ -993,6 +1257,11 @@ void GameScene::drawCollisionDebug(QPainter &painter) const
     painter.setPen(QPen(QColor(255, 114, 114, 220), 2, Qt::DashLine));
     for (const QRectF &rect : obstacleRects()) {
         painter.drawRect(rect);
+    }
+
+    painter.setPen(QPen(QColor(255, 128, 72, 220), 2, Qt::DashLine));
+    for (const HazardZone &zone : m_hazardZones) {
+        painter.drawRect(zone.rect);
     }
 
     painter.setPen(QPen(QColor(88, 255, 192, 220), 2, Qt::DashLine));
@@ -1046,6 +1315,16 @@ void GameScene::drawPlayer(QPainter &painter) const
         painter.drawEllipse(QPointF(centerX - 95.0, baseY + bob), 8.0, 4.0);
     }
 
+    if (m_damageFlashSeconds > 0.0f) {
+        painter.setPen(QPen(QColor(255, 102, 102), 4));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawEllipse(QPointF(centerX, baseY + bob), 92.0, 46.0);
+    } else if (m_invulnerabilitySeconds > 0.0f) {
+        painter.setPen(QPen(QColor(255, 215, 121, 180), 2, Qt::DashLine));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawEllipse(QPointF(centerX, baseY + bob), 88.0, 42.0);
+    }
+
     if (m_isRunFailed) {
         painter.setPen(QPen(QColor(255, 112, 112), 3));
         painter.drawEllipse(QPointF(centerX, baseY + bob), 88.0, 42.0);
@@ -1088,7 +1367,27 @@ void GameScene::drawHud(QPainter &painter) const
         break;
     }
 
-    const QRect oxygenBarRect(kHudPadding + 16, kHudPadding + 52, 388, 18);
+    const QRect healthBarRect(kHudPadding + 16, kHudPadding + 52, 388, 18);
+    painter.setBrush(QColor(23, 37, 49, 220));
+    painter.setPen(QPen(QColor(236, 166, 166), 1));
+    painter.drawRoundedRect(healthBarRect, 8, 8);
+
+    const int healthFillWidth = static_cast<int>((healthBarRect.width() - 4) * (m_playerHealth / qMax(1.0f, m_playerMaxHealth)));
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(255, 108, 108));
+    painter.drawRoundedRect(QRect(healthBarRect.left() + 2,
+                                  healthBarRect.top() + 2,
+                                  healthFillWidth,
+                                  healthBarRect.height() - 4),
+                            6,
+                            6);
+
+    painter.setPen(QColor(237, 247, 255));
+    painter.drawText(QRect(healthBarRect.left(), healthBarRect.top() - 20, healthBarRect.width(), 18),
+                     Qt::AlignLeft | Qt::AlignVCenter,
+                     QStringLiteral("艇体：%1 / %2").arg(m_playerHealth, 0, 'f', 1).arg(m_playerMaxHealth, 0, 'f', 1));
+
+    const QRect oxygenBarRect(kHudPadding + 16, kHudPadding + 88, 388, 18);
     painter.setBrush(QColor(23, 37, 49, 220));
     painter.setPen(QPen(QColor(154, 211, 236), 1));
     painter.drawRoundedRect(oxygenBarRect, 8, 8);
@@ -1135,10 +1434,11 @@ void GameScene::drawHud(QPainter &painter) const
         interactionText,
         QStringLiteral("当前输入：%1").arg(activeInputSummary()),
         QStringLiteral("返航方式：进入顶部中间的返航回收区"),
+        QStringLiteral("危险提示：电弧鳐会追击触电，热泉喷口会持续灼伤"),
         QStringLiteral("升级入口：返航结算后按 1-5 购买升级"),
     };
 
-    int y = kHudPadding + 86;
+    int y = kHudPadding + 122;
     for (const QString &line : lines) {
         painter.drawText(QRect(kHudPadding + 16, y, 412, 20), Qt::AlignLeft | Qt::AlignVCenter, line);
         y += 22;
@@ -1155,8 +1455,8 @@ void GameScene::drawHud(QPainter &painter) const
         QStringLiteral("1. 存活返航后会打开结算与升级面板"),
         QStringLiteral("2. 升级会消耗积分和长期材料"),
         QStringLiteral("3. 升级后下一轮属性立即生效"),
-        QStringLiteral("4. 升满后不能继续购买"),
-        QStringLiteral("5. 结算与升级界面不会继续耗氧"),
+        QStringLiteral("4. 电弧鳐追击与攻击会生效"),
+        QStringLiteral("5. 热泉喷口会持续造成危险"),
     };
 
     y = kHudPadding + 42;
@@ -1197,7 +1497,12 @@ void GameScene::drawHud(QPainter &painter) const
                          QStringLiteral("货舱已满：可以直接返航完成本轮结算。"));
     }
 
-    if (m_player.oxygenState() == Player::OxygenState::Warning) {
+    if (m_damageFlashSeconds > 0.0f) {
+        painter.setPen(QColor(255, 126, 126));
+        painter.drawText(QRect(width() - 310, kHudPadding + 190, 272, 42),
+                         Qt::TextWordWrap,
+                         QStringLiteral("受击警告：%1").arg(failureReasonText()));
+    } else if (m_player.oxygenState() == Player::OxygenState::Warning) {
         painter.setPen(QColor(255, 210, 94));
         painter.drawText(QRect(width() - 310, kHudPadding + 190, 272, 18),
                          Qt::AlignLeft | Qt::AlignVCenter,
@@ -1211,7 +1516,7 @@ void GameScene::drawHud(QPainter &painter) const
         painter.setPen(QColor(255, 105, 105));
         painter.drawText(QRect(width() - 310, kHudPadding + 190, 272, 42),
                          Qt::TextWordWrap,
-                         QStringLiteral("任务失败：氧气耗尽，本轮货物丢失。\n按 R 重新开始本轮出航。"));
+                         QStringLiteral("任务失败：%1，本轮货物丢失。\n按 R 重新开始本轮出航。").arg(failureReasonText()));
     } else if (m_isSettling) {
         painter.setPen(QColor(148, 241, 188));
         painter.drawText(QRect(width() - 310, kHudPadding + 190, 272, 42),
@@ -1240,9 +1545,10 @@ void GameScene::drawHud(QPainter &painter) const
                                  .arg(currentCargoLimitValue())
                                  .arg(currentMaxOxygenValue())
                                  .arg(currentMoveSpeedValue(), 0, 'f', 0);
-    const QString ruleState = QStringLiteral("采集耗时倍率：x%1 | 氧气消耗倍率：x%2")
+    const QString ruleState = QStringLiteral("采集耗时倍率：x%1 | 氧气消耗倍率：x%2 | 危险状态：%3")
                                   .arg(currentCollectionDurationMultiplier(), 0, 'f', 2)
-                                  .arg(currentOxygenEfficiencyMultiplier(), 0, 'f', 2);
+                                  .arg(currentOxygenEfficiencyMultiplier(), 0, 'f', 2)
+                                  .arg(m_lastDamageReason.isEmpty() ? QStringLiteral("正常") : m_lastDamageReason);
 
     painter.drawText(QRect(kHudPadding + 16, height() - 100, 620, 18), Qt::AlignLeft | Qt::AlignVCenter, returnState);
     painter.drawText(QRect(kHudPadding + 16, height() - 78, 620, 18), Qt::AlignLeft | Qt::AlignVCenter, persistentState);
