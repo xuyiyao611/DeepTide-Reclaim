@@ -15,6 +15,7 @@ Q_LOGGING_CATEGORY(inputLog, "deep_tide.input")
 Q_LOGGING_CATEGORY(collisionLog, "deep_tide.collision")
 Q_LOGGING_CATEGORY(oxygenLog, "deep_tide.oxygen")
 Q_LOGGING_CATEGORY(collectLog, "deep_tide.collect")
+Q_LOGGING_CATEGORY(settlementLog, "deep_tide.settlement")
 
 namespace {
 
@@ -32,6 +33,10 @@ constexpr float kDepthOxygenCostPerSecond = 3.4f;
 constexpr float kMoveOxygenCostPerSecond = 0.9f;
 constexpr float kMaxDepthMeters = 1200.0f;
 constexpr float kCollectRangePadding = 16.0f;
+constexpr float kReturnZoneWidthFactor = 0.24f;
+constexpr float kReturnZoneHeight = 54.0f;
+constexpr float kReturnZoneTopInset = 14.0f;
+constexpr int kGlowClusterSellValue = 12;
 
 QString keyToName(const int key)
 {
@@ -62,6 +67,9 @@ QString keyToName(const int key)
         return QStringLiteral("R");
     case Qt::Key_E:
         return QStringLiteral("E");
+    case Qt::Key_Return:
+    case Qt::Key_Enter:
+        return QStringLiteral("Enter");
     default:
         return QStringLiteral("Key(%1)").arg(key);
     }
@@ -71,6 +79,16 @@ bool isDirectionalKey(const int key)
 {
     return key == Qt::Key_W || key == Qt::Key_A || key == Qt::Key_S || key == Qt::Key_D ||
            key == Qt::Key_Up || key == Qt::Key_Down || key == Qt::Key_Left || key == Qt::Key_Right;
+}
+
+QVector<ResourceItem::Type> allResourceTypes()
+{
+    return {
+        ResourceItem::Type::GlowCluster,
+        ResourceItem::Type::ShellCrystal,
+        ResourceItem::Type::ColdGel,
+        ResourceItem::Type::OldPart,
+    };
 }
 
 }  // namespace
@@ -110,6 +128,7 @@ void GameScene::paintEvent(QPaintEvent *event)
 
     drawBackground(painter);
     drawSeaFloor(painter);
+    drawReturnZone(painter);
     drawObstacles(painter);
     drawResources(painter);
     drawPlayer(painter);
@@ -117,6 +136,9 @@ void GameScene::paintEvent(QPaintEvent *event)
         drawCollisionDebug(painter);
     }
     drawHud(painter);
+    if (m_isSettling) {
+        drawSettlementOverlay(painter);
+    }
 }
 
 void GameScene::keyPressEvent(QKeyEvent *event)
@@ -131,6 +153,18 @@ void GameScene::keyPressEvent(QKeyEvent *event)
         qCInfo(collisionLog) << "[collision] debug overlay =" << m_showCollisionDebug;
         update();
         event->accept();
+        return;
+    }
+
+    if (m_isSettling) {
+        if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter || event->key() == Qt::Key_Space ||
+            event->key() == Qt::Key_E) {
+            m_isSettling = false;
+            resetRunState();
+            qCInfo(settlementLog) << "[settlement] settlement closed, next run started.";
+        }
+        event->accept();
+        update();
         return;
     }
 
@@ -175,6 +209,8 @@ void GameScene::tick()
     updatePlayer(m_lastDtSeconds);
     updateOxygen(m_lastDtSeconds);
     updateCollection(m_lastDtSeconds);
+    updateRunMetrics(deltaMs);
+    updateReturnSequence();
 
     update();
 }
@@ -201,9 +237,13 @@ void GameScene::resetRunState()
 {
     m_pressedKeys.clear();
     m_isRunFailed = false;
+    m_isSettling = false;
     m_collectingResourceIndex = -1;
+    m_lastSettlement = {};
     m_currentCollectProgress = 0.0f;
     m_lastOxygenCostPerSecond = 0.0f;
+    m_runElapsedMs = 0;
+    m_runMaxDepthMeters = 0.0f;
     m_player.setVelocity(QPointF());
     m_player.setOxygen(m_player.maxOxygen());
     m_inventory.reset();
@@ -216,7 +256,7 @@ void GameScene::processInput(const float dt)
 {
     Q_UNUSED(dt);
 
-    if (m_isRunFailed) {
+    if (m_isRunFailed || m_isSettling) {
         m_player.setVelocity(QPointF());
         return;
     }
@@ -270,7 +310,7 @@ void GameScene::processInput(const float dt)
 
 void GameScene::updatePlayer(const float dt)
 {
-    if (dt <= 0.0f || m_isRunFailed) {
+    if (dt <= 0.0f || m_isRunFailed || m_isSettling) {
         return;
     }
 
@@ -383,9 +423,30 @@ void GameScene::resetResources()
     };
 }
 
+void GameScene::updateRunMetrics(const qint64 deltaMs)
+{
+    if (!m_hasSpawnedPlayer || m_isRunFailed || m_isSettling || deltaMs <= 0) {
+        return;
+    }
+
+    m_runElapsedMs += deltaMs;
+    m_runMaxDepthMeters = qMax(m_runMaxDepthMeters, currentDepthMeters());
+}
+
+void GameScene::updateReturnSequence()
+{
+    if (!m_hasSpawnedPlayer || m_isRunFailed || m_isSettling) {
+        return;
+    }
+
+    if (m_player.bounds().intersects(returnZoneRect())) {
+        settleCurrentRun();
+    }
+}
+
 void GameScene::updateCollection(const float dt)
 {
-    if (m_isRunFailed) {
+    if (m_isRunFailed || m_isSettling) {
         m_collectingResourceIndex = -1;
         m_currentCollectProgress = 0.0f;
         return;
@@ -477,6 +538,54 @@ void GameScene::finishCollection(const int resourceIndex)
     m_currentCollectProgress = 0.0f;
 }
 
+void GameScene::settleCurrentRun()
+{
+    SettlementReport report;
+    report.totalCollected = m_inventory.totalItemCount();
+    report.deepestDepthMeters = m_runMaxDepthMeters;
+    report.tripDurationMs = m_runElapsedMs;
+
+    QStringList soldParts;
+    QStringList retainedParts;
+
+    for (const ResourceItem::Type type : allResourceTypes()) {
+        const int count = m_inventory.count(type);
+        if (count <= 0) {
+            continue;
+        }
+
+        if (isRetainedMaterial(type)) {
+            m_materialStock[static_cast<int>(type)] += count;
+            report.retainedCount += count;
+            retainedParts.push_back(formatResourceCount(type, count));
+        } else {
+            const int soldValue = sellValueForType(type) * count;
+            m_credits += soldValue;
+            report.soldCount += count;
+            report.soldValue += soldValue;
+            soldParts.push_back(QStringLiteral("%1 (+%2)").arg(formatResourceCount(type, count)).arg(soldValue));
+        }
+    }
+
+    report.soldSummary = soldParts.isEmpty() ? QStringLiteral("无可出售资源") : soldParts.join(QStringLiteral(" / "));
+    report.retainedSummary = retainedParts.isEmpty() ? QStringLiteral("无新增材料") : retainedParts.join(QStringLiteral(" / "));
+
+    m_lastSettlement = report;
+    m_isSettling = true;
+    m_collectingResourceIndex = -1;
+    m_currentCollectProgress = 0.0f;
+    m_player.setVelocity(QPointF());
+    m_pressedKeys.clear();
+
+    qCInfo(settlementLog).noquote()
+        << QStringLiteral("[settlement] return success | collected=%1 sold=%2 value=%3 retained=%4 credits=%5")
+               .arg(report.totalCollected)
+               .arg(report.soldCount)
+               .arg(report.soldValue)
+               .arg(report.retainedCount)
+               .arg(m_credits);
+}
+
 float GameScene::currentDepthRatio() const
 {
     const QRectF area = playAreaRect();
@@ -501,6 +610,20 @@ QRectF GameScene::playAreaRect() const
                   qMax(0.0, height() - kTopAreaOffset - kBottomAreaOffset));
 }
 
+QRectF GameScene::returnZoneRect() const
+{
+    const QRectF area = playAreaRect();
+    if (area.isEmpty()) {
+        return {};
+    }
+
+    const qreal zoneWidth = qMax(180.0, area.width() * kReturnZoneWidthFactor);
+    return QRectF(area.center().x() - zoneWidth * 0.5,
+                  area.top() + kReturnZoneTopInset,
+                  zoneWidth,
+                  kReturnZoneHeight);
+}
+
 QVector<QRectF> GameScene::obstacleRects() const
 {
     const QRectF area = playAreaRect();
@@ -519,6 +642,62 @@ QVector<QRectF> GameScene::obstacleRects() const
         QRectF(left + w * 0.66, top + h * 0.30, 72.0, h * 0.34),
         QRectF(left + w * 0.78, top + h * 0.68, 120.0, 34.0),
     };
+}
+
+QString GameScene::formatDuration(const qint64 durationMs) const
+{
+    const qint64 totalSeconds = qMax<qint64>(0, durationMs / 1000);
+    const qint64 minutes = totalSeconds / 60;
+    const qint64 seconds = totalSeconds % 60;
+    return QStringLiteral("%1:%2")
+        .arg(minutes, 2, 10, QChar('0'))
+        .arg(seconds, 2, 10, QChar('0'));
+}
+
+QString GameScene::formatResourceCount(const ResourceItem::Type type, const int count) const
+{
+    return QStringLiteral("%1x%2").arg(ResourceItem(type,
+                                                    ResourceItem::CollectMode::Instant,
+                                                    QPointF(),
+                                                    0.0f,
+                                                    0.0f,
+                                                    0)
+                                         .displayName())
+        .arg(count);
+}
+
+QString GameScene::formatMaterialStockSummary() const
+{
+    QStringList parts;
+    for (const ResourceItem::Type type : allResourceTypes()) {
+        const int count = m_materialStock.value(static_cast<int>(type), 0);
+        if (count > 0) {
+            parts.push_back(formatResourceCount(type, count));
+        }
+    }
+
+    return parts.isEmpty() ? QStringLiteral("无长期材料") : parts.join(QStringLiteral(" / "));
+}
+
+int GameScene::sellValueForType(const ResourceItem::Type type) const
+{
+    switch (type) {
+    case ResourceItem::Type::GlowCluster:
+        return kGlowClusterSellValue;
+    case ResourceItem::Type::ShellCrystal:
+    case ResourceItem::Type::ColdGel:
+    case ResourceItem::Type::OldPart:
+        return 0;
+    }
+
+    return 0;
+}
+
+bool GameScene::isRetainedMaterial(const ResourceItem::Type type) const
+{
+    return type == ResourceItem::Type::ShellCrystal ||
+           type == ResourceItem::Type::ColdGel ||
+           type == ResourceItem::Type::OldPart;
 }
 
 void GameScene::drawBackground(QPainter &painter) const
@@ -569,6 +748,26 @@ void GameScene::drawObstacles(QPainter &painter) const
     }
 }
 
+void GameScene::drawReturnZone(QPainter &painter) const
+{
+    const QRectF zone = returnZoneRect();
+    if (zone.isEmpty()) {
+        return;
+    }
+
+    painter.save();
+    const bool active = m_player.bounds().intersects(zone) && !m_isRunFailed;
+    painter.setPen(QPen(active ? QColor(255, 245, 168) : QColor(158, 232, 255), 2));
+    painter.setBrush(active ? QColor(255, 245, 168, 70) : QColor(99, 210, 240, 50));
+    painter.drawRoundedRect(zone, 14.0, 14.0);
+
+    painter.setPen(QColor(236, 248, 255));
+    painter.drawText(zone.adjusted(0.0, 8.0, 0.0, 0.0),
+                     Qt::AlignTop | Qt::AlignHCenter,
+                     QStringLiteral("返航回收区"));
+    painter.restore();
+}
+
 void GameScene::drawResources(QPainter &painter) const
 {
     const int activeIndex = currentCollectableIndex();
@@ -602,6 +801,9 @@ void GameScene::drawCollisionDebug(QPainter &painter) const
 
     painter.setPen(QPen(QColor(255, 223, 125, 200), 2, Qt::DashLine));
     painter.drawRect(playAreaRect());
+
+    painter.setPen(QPen(QColor(114, 224, 255, 220), 2, Qt::DashLine));
+    painter.drawRect(returnZoneRect());
 
     painter.setPen(QPen(QColor(255, 114, 114, 220), 2, Qt::DashLine));
     const QVector<QRectF> obstacles = obstacleRects();
@@ -820,6 +1022,93 @@ void GameScene::drawHud(QPainter &painter) const
                          Qt::TextWordWrap,
                          QStringLiteral("任务失败：氧气耗尽\n按 R 重新开始本次出航"));
     }
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(0, 0, 0, 120));
+    painter.drawRoundedRect(QRect(kHudPadding, height() - 136, 540, 110), 14, 14);
+
+    painter.setPen(QColor(238, 247, 255));
+    painter.drawText(QRect(kHudPadding + 16, height() - 126, 508, 22),
+                     Qt::AlignLeft | Qt::AlignVCenter,
+                     QStringLiteral("P5 Return & Settlement"));
+
+    const QString returnState = m_isSettling
+        ? QStringLiteral("Returned: settlement open, press Enter/Space/E for next run")
+        : (m_player.bounds().intersects(returnZoneRect()) && !m_isRunFailed
+               ? QStringLiteral("Return zone reached: settlement is being processed")
+               : QStringLiteral("Goal: reach the top-center return zone while alive"));
+    const QString persistentState = QStringLiteral("Credits: %1 | Materials: %2")
+                                        .arg(m_credits)
+                                        .arg(formatMaterialStockSummary());
+    const QString runState = QStringLiteral("Run Cargo: %1 | Run Time: %2 | Max Depth: %3 m")
+                                 .arg(m_inventory.summaryText())
+                                 .arg(formatDuration(m_runElapsedMs))
+                                 .arg(m_runMaxDepthMeters, 0, 'f', 1);
+    const QString ruleState = QStringLiteral("Rule: Glow Clusters sell for %1 each; other items are retained as long-term materials")
+                                  .arg(kGlowClusterSellValue);
+
+    painter.drawText(QRect(kHudPadding + 16, height() - 100, 508, 18),
+                     Qt::AlignLeft | Qt::AlignVCenter,
+                     returnState);
+    painter.drawText(QRect(kHudPadding + 16, height() - 78, 508, 18),
+                     Qt::AlignLeft | Qt::AlignVCenter,
+                     persistentState);
+    painter.drawText(QRect(kHudPadding + 16, height() - 56, 508, 18),
+                     Qt::AlignLeft | Qt::AlignVCenter,
+                     runState);
+    painter.drawText(QRect(kHudPadding + 16, height() - 34, 508, 18),
+                     Qt::AlignLeft | Qt::AlignVCenter,
+                     ruleState);
+}
+
+void GameScene::drawSettlementOverlay(QPainter &painter) const
+{
+    painter.save();
+    painter.fillRect(rect(), QColor(1, 8, 18, 168));
+
+    const QRect panel(width() / 2 - 270, height() / 2 - 200, 540, 400);
+    painter.setPen(QPen(QColor(169, 227, 245), 2));
+    painter.setBrush(QColor(8, 24, 39, 236));
+    painter.drawRoundedRect(panel, 18, 18);
+
+    QFont titleFont = painter.font();
+    titleFont.setPointSize(18);
+    titleFont.setBold(true);
+    painter.setFont(titleFont);
+    painter.setPen(QColor(242, 248, 255));
+    painter.drawText(panel.adjusted(24, 20, -24, 0),
+                     Qt::AlignTop | Qt::AlignHCenter,
+                     QStringLiteral("本轮返航结算"));
+
+    QFont bodyFont = painter.font();
+    bodyFont.setPointSize(11);
+    bodyFont.setBold(false);
+    painter.setFont(bodyFont);
+
+    const QStringList lines = {
+        QStringLiteral("出航时长：%1").arg(formatDuration(m_lastSettlement.tripDurationMs)),
+        QStringLiteral("最深下潜：%1 m").arg(m_lastSettlement.deepestDepthMeters, 0, 'f', 1),
+        QStringLiteral("采集总数：%1").arg(m_lastSettlement.totalCollected),
+        QStringLiteral("出售资源：%1").arg(m_lastSettlement.soldSummary),
+        QStringLiteral("出售收益：+%1 积分").arg(m_lastSettlement.soldValue),
+        QStringLiteral("保留材料：%1").arg(m_lastSettlement.retainedSummary),
+        QStringLiteral("累计积分：%1").arg(m_credits),
+        QStringLiteral("材料库存：%1").arg(formatMaterialStockSummary()),
+        QStringLiteral("下一步：按 Enter、Space 或 E 开始下一轮出航"),
+    };
+
+    int y = panel.top() + 76;
+    for (const QString &line : lines) {
+        painter.drawText(QRect(panel.left() + 28, y, panel.width() - 56, 26),
+                         Qt::AlignLeft | Qt::AlignVCenter,
+                         line);
+        y += 32;
+    }
+
+    painter.setPen(QColor(141, 203, 224));
+    painter.drawText(QRect(panel.left() + 28, panel.bottom() - 56, panel.width() - 56, 24),
+                     Qt::AlignLeft | Qt::AlignVCenter,
+                     QStringLiteral("规则：荧团浮体直接兑换积分，壳晶石、冷凝胶、旧时代零件转入长期材料库存。"));
+    painter.restore();
 }
 
 QString GameScene::activeInputSummary() const

@@ -5,6 +5,7 @@
 #include "resourceitem.h"
 
 #include <QElapsedTimer>
+#include <QHash>
 #include <QRectF>
 #include <QSet>
 #include <QVector>
@@ -30,6 +31,17 @@ private slots:
     void tick();
 
 private:
+    struct SettlementReport {
+        int totalCollected = 0;
+        int soldCount = 0;
+        int soldValue = 0;
+        int retainedCount = 0;
+        float deepestDepthMeters = 0.0f;
+        qint64 tripDurationMs = 0;
+        QString soldSummary;
+        QString retainedSummary;
+    };
+
     void ensurePlayerSpawned();
     void resetRunState();
     void processInput(float dt);
@@ -37,19 +49,30 @@ private:
     void updateOxygen(float dt);
     void resetResources();
     void updateCollection(float dt);
+    void updateRunMetrics(qint64 deltaMs);
+    void updateReturnSequence();
     int currentCollectableIndex() const;
     void finishCollection(int resourceIndex);
+    void settleCurrentRun();
     float currentDepthRatio() const;
     float currentDepthMeters() const;
     QRectF playAreaRect() const;
+    QRectF returnZoneRect() const;
     QVector<QRectF> obstacleRects() const;
+    QString formatDuration(qint64 durationMs) const;
+    QString formatResourceCount(ResourceItem::Type type, int count) const;
+    QString formatMaterialStockSummary() const;
+    int sellValueForType(ResourceItem::Type type) const;
+    bool isRetainedMaterial(ResourceItem::Type type) const;
     void drawBackground(QPainter &painter) const;
     void drawSeaFloor(QPainter &painter) const;
     void drawObstacles(QPainter &painter) const;
+    void drawReturnZone(QPainter &painter) const;
     void drawResources(QPainter &painter) const;
     void drawCollisionDebug(QPainter &painter) const;
     void drawPlayer(QPainter &painter) const;
     void drawHud(QPainter &painter) const;
+    void drawSettlementOverlay(QPainter &painter) const;
     QString activeInputSummary() const;
     void logInputState(const char *action, int key) const;
 
@@ -61,13 +84,19 @@ private:
     QVector<ResourceItem> m_resources;
     bool m_hasSpawnedPlayer = false;
     bool m_isRunFailed = false;
+    bool m_isSettling = false;
     bool m_showCollisionDebug = true;
     int m_collectingResourceIndex = -1;
+    int m_credits = 0;
     float m_lastDtSeconds = 0.0f;
     float m_currentCollectProgress = 0.0f;
     float m_lastOxygenCostPerSecond = 0.0f;
+    float m_runMaxDepthMeters = 0.0f;
     qint64 m_lastTickMs = 0;
     qint64 m_totalElapsedMs = 0;
+    qint64 m_runElapsedMs = 0;
     QString m_assetStatusText;
     bool m_assetLayoutReady = false;
+    QHash<int, int> m_materialStock;
+    SettlementReport m_lastSettlement;
 };
