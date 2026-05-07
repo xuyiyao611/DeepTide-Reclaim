@@ -133,6 +133,12 @@ private:
     void settleCurrentRun();
     void tryPurchaseUpgrade(UpgradeType type);
     void tryLaunchSelectedRegion();
+    bool loadPersistentState(bool demoSlot);
+    bool savePersistentState(bool demoSlot) const;
+    QString saveFilePath(bool demoSlot) const;
+    void setStatusMessage(const QString &message);
+    void playFeedbackBeep() const;
+    int lifetimeCollectedCount(ResourceItem::Type type) const;
     void applyDamage(float damage,
                      float oxygenDamage,
                      const QPointF &knockbackDirection,
@@ -178,6 +184,7 @@ private:
     void drawPlayer(QPainter &painter) const;
     void drawHud(QPainter &painter) const;
     void drawSettlementOverlay(QPainter &painter) const;
+    void drawCodexOverlay(QPainter &painter) const;
     QString activeInputSummary() const;
     void logInputState(const char *action, int key) const;
 
@@ -192,7 +199,9 @@ private:
     bool m_hasSpawnedPlayer = false;
     bool m_isRunFailed = false;
     bool m_isSettling = false;
+    bool m_showCodexOverlay = false;
     bool m_showCollisionDebug = true;
+    bool m_soundEnabled = true;
     int m_collectingResourceIndex = -1;
     int m_credits = 0;
     int m_lifetimeCreditsEarned = 0;
@@ -210,12 +219,15 @@ private:
     qint64 m_totalElapsedMs = 0;
     qint64 m_runElapsedMs = 0;
     QString m_assetStatusText;
+    QString m_statusText;
     QString m_upgradeFeedbackText;
     QString m_lastDamageReason;
+    qint64 m_statusTextExpiresMs = 0;
     bool m_assetLayoutReady = false;
     SeaRegionId m_currentRegion = SeaRegionId::CoastalShelf;
     SeaRegionId m_selectedRegion = SeaRegionId::CoastalShelf;
     QHash<int, int> m_materialStock;
+    QHash<int, int> m_lifetimeCollectedCounts;
     QHash<int, int> m_upgradeLevels;
     QHash<int, bool> m_regionUnlocked;
     QSet<int> m_discoveredResourceTypes;
