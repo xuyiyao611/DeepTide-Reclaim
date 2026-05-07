@@ -12,6 +12,7 @@
 Q_LOGGING_CATEGORY(startupLog, "deep_tide.startup")
 Q_LOGGING_CATEGORY(resourceLog, "deep_tide.resource")
 Q_LOGGING_CATEGORY(inputLog, "deep_tide.input")
+Q_LOGGING_CATEGORY(collisionLog, "deep_tide.collision")
 
 namespace {
 
@@ -21,6 +22,9 @@ constexpr float kInputDiagonalFactor = 0.70710678f;
 constexpr float kWaterDragFactor = 7.5f;
 constexpr float kSpawnXFactor = 0.5f;
 constexpr float kSpawnYFactor = 0.42f;
+constexpr float kPlayAreaMargin = 36.0f;
+constexpr float kTopAreaOffset = 104.0f;
+constexpr float kBottomAreaOffset = 82.0f;
 
 QString keyToName(const int key)
 {
@@ -45,6 +49,8 @@ QString keyToName(const int key)
         return QStringLiteral("Space");
     case Qt::Key_Escape:
         return QStringLiteral("Esc");
+    case Qt::Key_F1:
+        return QStringLiteral("F1");
     default:
         return QStringLiteral("Key(%1)").arg(key);
     }
@@ -91,13 +97,25 @@ void GameScene::paintEvent(QPaintEvent *event)
 
     drawBackground(painter);
     drawSeaFloor(painter);
+    drawObstacles(painter);
     drawPlayer(painter);
+    if (m_showCollisionDebug) {
+        drawCollisionDebug(painter);
+    }
     drawHud(painter);
 }
 
 void GameScene::keyPressEvent(QKeyEvent *event)
 {
     if (event->isAutoRepeat()) {
+        event->accept();
+        return;
+    }
+
+    if (event->key() == Qt::Key_F1) {
+        m_showCollisionDebug = !m_showCollisionDebug;
+        qCInfo(collisionLog) << "[collision] debug overlay =" << m_showCollisionDebug;
+        update();
         event->accept();
         return;
     }
@@ -145,7 +163,9 @@ void GameScene::ensurePlayerSpawned()
     }
 
     if (!m_hasSpawnedPlayer) {
-        m_player.setPosition(QPointF(width() * kSpawnXFactor, height() * kSpawnYFactor));
+        const QRectF area = playAreaRect();
+        m_player.setPosition(QPointF(area.left() + area.width() * kSpawnXFactor,
+                                     area.top() + area.height() * kSpawnYFactor));
         m_player.setRadius(28.0f);
         m_player.setMoveSpeed(240.0f);
         m_hasSpawnedPlayer = true;
@@ -209,12 +229,105 @@ void GameScene::updatePlayer(const float dt)
         return;
     }
 
-    QPointF nextPosition = m_player.position() + m_player.velocity() * dt;
-    const float margin = m_player.radius() + 24.0f;
+    const QRectF area = playAreaRect();
+    const QVector<QRectF> obstacles = obstacleRects();
+    QRectF bounds = m_player.bounds();
+    QPointF velocity = m_player.velocity();
 
-    nextPosition.setX(qBound(margin, static_cast<float>(nextPosition.x()), static_cast<float>(width()) - margin));
-    nextPosition.setY(qBound(margin, static_cast<float>(nextPosition.y()), static_cast<float>(height()) - margin));
-    m_player.setPosition(nextPosition);
+    const qreal dx = velocity.x() * dt;
+    if (!qFuzzyIsNull(dx)) {
+        bounds.translate(dx, 0.0);
+
+        if (bounds.left() < area.left()) {
+            bounds.moveLeft(area.left());
+            velocity.setX(0.0);
+        } else if (bounds.right() > area.right()) {
+            bounds.moveRight(area.right());
+            velocity.setX(0.0);
+        }
+
+        for (const QRectF &obstacle : obstacles) {
+            if (!bounds.intersects(obstacle)) {
+                continue;
+            }
+
+            if (dx > 0.0) {
+                bounds.moveRight(obstacle.left());
+            } else {
+                bounds.moveLeft(obstacle.right());
+            }
+            velocity.setX(0.0);
+            qCInfo(collisionLog).noquote()
+                << QStringLiteral("[collision] horizontal hit obstacle at (%1, %2, %3, %4)")
+                       .arg(obstacle.left(), 0, 'f', 1)
+                       .arg(obstacle.top(), 0, 'f', 1)
+                       .arg(obstacle.width(), 0, 'f', 1)
+                       .arg(obstacle.height(), 0, 'f', 1);
+        }
+    }
+
+    const qreal dy = velocity.y() * dt;
+    if (!qFuzzyIsNull(dy)) {
+        bounds.translate(0.0, dy);
+
+        if (bounds.top() < area.top()) {
+            bounds.moveTop(area.top());
+            velocity.setY(0.0);
+        } else if (bounds.bottom() > area.bottom()) {
+            bounds.moveBottom(area.bottom());
+            velocity.setY(0.0);
+        }
+
+        for (const QRectF &obstacle : obstacles) {
+            if (!bounds.intersects(obstacle)) {
+                continue;
+            }
+
+            if (dy > 0.0) {
+                bounds.moveBottom(obstacle.top());
+            } else {
+                bounds.moveTop(obstacle.bottom());
+            }
+            velocity.setY(0.0);
+            qCInfo(collisionLog).noquote()
+                << QStringLiteral("[collision] vertical hit obstacle at (%1, %2, %3, %4)")
+                       .arg(obstacle.left(), 0, 'f', 1)
+                       .arg(obstacle.top(), 0, 'f', 1)
+                       .arg(obstacle.width(), 0, 'f', 1)
+                       .arg(obstacle.height(), 0, 'f', 1);
+        }
+    }
+
+    m_player.setVelocity(velocity);
+    m_player.setPosition(bounds.center());
+}
+
+QRectF GameScene::playAreaRect() const
+{
+    return QRectF(kPlayAreaMargin,
+                  kTopAreaOffset,
+                  qMax(0.0, width() - kPlayAreaMargin * 2.0),
+                  qMax(0.0, height() - kTopAreaOffset - kBottomAreaOffset));
+}
+
+QVector<QRectF> GameScene::obstacleRects() const
+{
+    const QRectF area = playAreaRect();
+    if (area.isEmpty()) {
+        return {};
+    }
+
+    const qreal left = area.left();
+    const qreal top = area.top();
+    const qreal w = area.width();
+    const qreal h = area.height();
+
+    return {
+        QRectF(left + w * 0.12, top + h * 0.22, 78.0, h * 0.24),
+        QRectF(left + w * 0.38, top + h * 0.56, 160.0, 46.0),
+        QRectF(left + w * 0.66, top + h * 0.30, 72.0, h * 0.34),
+        QRectF(left + w * 0.78, top + h * 0.68, 120.0, 34.0),
+    };
 }
 
 void GameScene::drawBackground(QPainter &painter) const
@@ -248,6 +361,40 @@ void GameScene::drawSeaFloor(QPainter &painter) const
     painter.fillPath(floorPath, QColor(26, 44, 41));
     painter.setPen(QPen(QColor(86, 126, 118), 2));
     painter.drawPath(floorPath);
+}
+
+void GameScene::drawObstacles(QPainter &painter) const
+{
+    painter.setPen(QPen(QColor(144, 186, 193), 2));
+
+    const QVector<QRectF> obstacles = obstacleRects();
+    for (int index = 0; index < obstacles.size(); ++index) {
+        const QRectF &rect = obstacles.at(index);
+        painter.setBrush(index % 2 == 0 ? QColor(67, 88, 93) : QColor(79, 102, 109));
+        painter.drawRoundedRect(rect, 10.0, 10.0);
+
+        painter.setBrush(QColor(128, 206, 220, 120));
+        painter.drawEllipse(QPointF(rect.center().x(), rect.top() + 12.0), 6.0, 6.0);
+    }
+}
+
+void GameScene::drawCollisionDebug(QPainter &painter) const
+{
+    painter.save();
+    painter.setBrush(Qt::NoBrush);
+
+    painter.setPen(QPen(QColor(255, 223, 125, 200), 2, Qt::DashLine));
+    painter.drawRect(playAreaRect());
+
+    painter.setPen(QPen(QColor(255, 114, 114, 220), 2, Qt::DashLine));
+    const QVector<QRectF> obstacles = obstacleRects();
+    for (const QRectF &rect : obstacles) {
+        painter.drawRect(rect);
+    }
+
+    painter.setPen(QPen(QColor(88, 255, 192, 220), 2, Qt::DashLine));
+    painter.drawRect(m_player.bounds());
+    painter.restore();
 }
 
 void GameScene::drawPlayer(QPainter &painter) const
@@ -308,7 +455,7 @@ void GameScene::drawHud(QPainter &painter) const
     painter.setFont(titleFont);
     painter.drawText(QRect(kHudPadding + 16, kHudPadding + 14, 380, 28),
                      Qt::AlignLeft | Qt::AlignVCenter,
-                     QStringLiteral("深潮回收站 / P1 玩家移动"));
+                     QStringLiteral("深潮回收站 / P2 碰撞与边界"));
 
     QFont bodyFont = painter.font();
     bodyFont.setPointSize(10);
@@ -317,15 +464,18 @@ void GameScene::drawHud(QPainter &painter) const
 
     const QPointF playerPosition = m_player.position();
     const QPointF playerVelocity = m_player.velocity();
+    const QRectF area = playAreaRect();
+    const QVector<QRectF> obstacles = obstacleRects();
 
     const QStringList lines = {
         QStringLiteral("定时刷新：QTimer %1 ms").arg(kTargetFrameMs),
         QStringLiteral("累计运行：%1 ms / dt %.3f s").arg(m_lastTickMs).arg(m_lastDtSeconds, 0, 'f', 3),
-        QStringLiteral("资源检查：%1").arg(m_assetLayoutReady ? QStringLiteral("通过") : QStringLiteral("异常")),
+        QStringLiteral("游戏区域：(%1, %2, %3, %4)").arg(area.left(), 0, 'f', 0).arg(area.top(), 0, 'f', 0).arg(area.width(), 0, 'f', 0).arg(area.height(), 0, 'f', 0),
         QStringLiteral("玩家位置：(%1, %2)").arg(playerPosition.x(), 0, 'f', 1).arg(playerPosition.y(), 0, 'f', 1),
         QStringLiteral("玩家速度：(%1, %2)").arg(playerVelocity.x(), 0, 'f', 1).arg(playerVelocity.y(), 0, 'f', 1),
+        QStringLiteral("障碍数量：%1 / 调试框：%2").arg(obstacles.size()).arg(m_showCollisionDebug ? QStringLiteral("开(F1)") : QStringLiteral("关(F1)")),
         QStringLiteral("当前输入：%1").arg(activeInputSummary()),
-        QStringLiteral("提示：点击窗口后按 WASD / 方向键，观察潜水器移动"),
+        QStringLiteral("提示：用 WASD 贴边和撞障碍，观察 AABB 修正"),
     };
 
     int y = kHudPadding + 52;
@@ -339,14 +489,14 @@ void GameScene::drawHud(QPainter &painter) const
     painter.setPen(QColor(184, 227, 246));
     painter.drawText(QRect(width() - 290, kHudPadding + 16, 250, 20),
                      Qt::AlignLeft | Qt::AlignVCenter,
-                     QStringLiteral("P1 验证点"));
+                     QStringLiteral("P2 验证点"));
 
     const QStringList checklist = {
-        QStringLiteral("1. 玩家能持续移动"),
-        QStringLiteral("2. 松开按键能停下"),
-        QStringLiteral("3. 斜向输入可预测"),
-        QStringLiteral("4. HUD 显示位置速度"),
-        QStringLiteral("5. 出生点稳定一致"),
+        QStringLiteral("1. 玩家不能越界"),
+        QStringLiteral("2. 玩家不能穿障碍"),
+        QStringLiteral("3. 贴边移动不抖动"),
+        QStringLiteral("4. 撞角不瞬移"),
+        QStringLiteral("5. F1 可切碰撞框"),
     };
 
     y = kHudPadding + 42;
